@@ -195,13 +195,13 @@ void thread_destroy(struct thread *thread);
 static inline void
 thread_set_flag(struct thread *thread, unsigned long flag)
 {
-    atomic_or_ulong(&thread->flags, flag);
+    atomic_or(&thread->flags, flag);
 }
 
 static inline void
 thread_clear_flag(struct thread *thread, unsigned long flag)
 {
-    atomic_and_ulong(&thread->flags, ~flag);
+    atomic_and(&thread->flags, ~flag);
 }
 
 static inline int

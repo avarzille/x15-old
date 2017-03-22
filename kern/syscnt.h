@@ -57,12 +57,12 @@ void syscnt_setup(void);
  */
 void syscnt_register(struct syscnt *syscnt, const char *name);
 
-#ifdef __LP64__
+#ifdef X15_HAVE_64B_ATOMIC
 
 static inline void
 syscnt_add(struct syscnt *syscnt, int64_t delta)
 {
-    atomic_add_ulong(&syscnt->value, delta);
+    atomic_add(&syscnt->value, delta);
 }
 
 static inline uint64_t
@@ -71,7 +71,7 @@ syscnt_read(const struct syscnt *syscnt)
     return read_once(syscnt->value);
 }
 
-#else /* __LP64__ */
+#else /* X15_HAVE_64B_ATOMIC */
 
 static inline void
 syscnt_add(struct syscnt *syscnt, int64_t delta)
@@ -96,7 +96,7 @@ syscnt_read(struct syscnt *syscnt)
     return value;
 }
 
-#endif /* __LP64__ */
+#endif /* X15_HAVE_64B_ATOMIC */
 
 static inline void
 syscnt_inc(struct syscnt *syscnt)

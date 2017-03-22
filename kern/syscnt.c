@@ -40,7 +40,7 @@ syscnt_setup(void)
 void __init
 syscnt_register(struct syscnt *syscnt, const char *name)
 {
-#ifndef __LP64__
+#ifndef X15_HAVE_64B_ATOMIC
     spinlock_init(&syscnt->lock);
 #endif /* __LP64__ */
     syscnt->value = 0;

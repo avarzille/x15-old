@@ -78,7 +78,7 @@ bitmap_set_atomic(unsigned long *bm, int bit)
         bitmap_lookup(bm, bit);
     }
 
-    atomic_or_ulong(bm, bitmap_mask(bit));
+    atomic_or(bm, bitmap_mask(bit));
 }
 
 static inline void
@@ -98,7 +98,7 @@ bitmap_clear_atomic(unsigned long *bm, int bit)
         bitmap_lookup(bm, bit);
     }
 
-    atomic_and_ulong(bm, ~bitmap_mask(bit));
+    atomic_and(bm, ~bitmap_mask(bit));
 }
 
 static inline int

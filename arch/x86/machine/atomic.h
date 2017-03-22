@@ -25,448 +25,372 @@
 
 #include <stdint.h>
 
-#define ATOMIC_ADD(ptr, delta)                              \
-    asm volatile("lock add %1, %0"                          \
-                 : "+m" (*(ptr))                            \
-                 : "r" (delta))
+/*
+ * Arithmetic and logical operations.
+ * We settle at a memory order of 'acquire-release',
+ * since that's enough for us.
+ */
+#define atomic_fetch_add(ptr, val)   \
+    __atomic_fetch_add((ptr), (val), __ATOMIC_ACQ_REL)
 
-#define ATOMIC_FETCHADD(ptr, oldval, delta)                 \
-    asm volatile("lock xadd %1, %0"                         \
-                 : "+m" (*(ptr)), "=r" (oldval)             \
-                 : "1" (delta)                              \
-                 : "memory")
+#define atomic_add(ptr, val)   \
+    ((void) __atomic_add_fetch((ptr), (val), __ATOMIC_ACQ_REL))
 
-#define ATOMIC_AND(ptr, bits)                               \
-    asm volatile("lock and %1, %0"                          \
-                 : "+m" (*(ptr))                            \
-                 : "r" (bits))
+#define atomic_fetch_sub(ptr, val)   \
+    __atomic_fetch_sub((ptr), (val), __ATOMIC_ACQ_REL)
 
-#define ATOMIC_OR(ptr, bits)                                \
-    asm volatile("lock or %1, %0"                           \
-                 : "+m" (*(ptr))                            \
-                 : "r" (bits))
+#define atomic_sub(ptr, val)   \
+    ((void) __atomic_sub_fetch((ptr), (val), __ATOMIC_ACQ_REL))
 
-#define ATOMIC_XOR(ptr, bits)                               \
-    asm volatile("lock xor %1, %0"                          \
-                 : "+m" (*(ptr))                            \
-                 : "r" (bits))
+#define atomic_fetch_and(ptr, val)   \
+    __atomic_fetch_and((ptr), (val), __ATOMIC_ACQ_REL)
 
-/* The xchg instruction doesn't need a lock prefix */
-#define ATOMIC_SWAP(ptr, oldval, newval)                    \
-    asm volatile("xchg %1, %0"                              \
-                 : "+m" (*(ptr)), "=r" (oldval)             \
-                 : "1" (newval)                             \
-                 : "memory")
+#define atomic_and(ptr, val)   \
+    ((void) __atomic_and_fetch((ptr), (val), __ATOMIC_ACQ_REL))
 
-#define ATOMIC_CAS(ptr, oldval, predicate, newval)          \
-    asm volatile("lock cmpxchg %3, %0"                      \
-                 : "+m" (*(ptr)), "=a" (oldval)             \
-                 : "1" (predicate), "r" (newval)            \
-                 : "memory")
+#define atomic_fetch_or(ptr, val)   \
+    __atomic_fetch_or((ptr), (val), __ATOMIC_ACQ_REL)
 
-#define ATOMIC_LOCAL_ADD(ptr, delta)                        \
-    asm volatile("add %1, %0"                               \
-                 : "+m" (*(ptr))                            \
-                 : "r" (delta))
+#define atomic_or(ptr, val)   \
+    ((void) __atomic_or_fetch((ptr), (val), __ATOMIC_ACQ_REL))
 
-#define ATOMIC_LOCAL_FETCHADD(ptr, oldval, delta)           \
-    asm volatile("xadd %1, %0"                              \
-                 : "+m" (*(ptr)), "=r" (oldval)             \
-                 : "1" (delta)                              \
-                 : "memory")
+#define atomic_fetch_xor(ptr, val)   \
+    __atomic_fetch_xor((ptr), (val), __ATOMIC_ACQ_REL)
 
-#define ATOMIC_LOCAL_AND(ptr, bits)                         \
-    asm volatile("and %1, %0"                               \
-                 : "+m" (*(ptr))                            \
-                 : "r" (bits))
+#define atomic_xor(ptr, val)   \
+    ((void) __atomic_xor_fetch((ptr), (val), __ATOMIC_ACQ_REL))
 
-#define ATOMIC_LOCAL_OR(ptr, bits)                          \
-    asm volatile("or %1, %0"                                \
-                 : "+m" (*(ptr))                            \
-                 : "r" (bits))
+/*
+ * For atomic swap and compare-and-swap, we may select one out of three
+ * possible memory orders: acquire, release and sequential consistency.
+ */
 
-#define ATOMIC_LOCAL_XOR(ptr, bits)                         \
-    asm volatile("xor %1, %0"                               \
-                 : "+m" (*(ptr))                            \
-                 : "r" (bits))
+#define atomic_cas_helper(ptr, exp, nval, mo)                       \
+MACRO_BEGIN                                                         \
+    typeof(*(ptr)) __exp, __nval;                                   \
+                                                                    \
+    __exp = (exp);                                                  \
+    __nval = (nval);                                                \
+    __atomic_compare_exchange_n((ptr), &__exp, __nval, 0,           \
+                                __ATOMIC_##mo, __ATOMIC_RELAXED);   \
+    __exp;                                                          \
+MACRO_END
 
-/* The xchg instruction implies a lock prefix */
-#define ATOMIC_LOCAL_SWAP(ptr, oldval, newval)              \
-    asm volatile("xchg %1, %0"                              \
-                 : "+m" (*(ptr)), "=r" (oldval)             \
-                 : "1" (newval)                             \
-                 : "memory")
+#define atomic_cas_acq(ptr, exp, nval)   \
+    atomic_cas_helper((ptr), (exp), (nval), ACQUIRE)
 
-#define ATOMIC_LOCAL_CAS(ptr, oldval, predicate, newval)    \
+#define atomic_cas_rel(ptr, exp, nval)   \
+    atomic_cas_helper((ptr), (exp), (nval), RELEASE)
+
+#define atomic_cas_cst(ptr, exp, nval)   \
+    atomic_cas_helper((ptr), (exp), (nval), SEQ_CST)
+
+#define atomic_swap_helper(ptr, val, mo)   \
+    __atomic_exchange_n((ptr), (val), __ATOMIC_##mo)
+
+#define atomic_swap_acq(ptr, val)   \
+    atomic_swap_helper((ptr), (val), ACQUIRE)
+
+#define atomic_swap_rel(ptr, val)   \
+    atomic_swap_helper((ptr), (val), RELEASE)
+
+#define atomic_swap_cst(ptr, val)   \
+    atomic_swap_helper((ptr), (val), SEQ_CST)
+
+#ifdef __LP64__
+#  define atomic_load_helper(ptr, mo)   __atomic_load_n((ptr), __ATOMIC_##mo)
+
+#  define atomic_store_helper(ptr, val, mo)   \
+       __atomic_store_n((ptr), (val), __ATOMIC##_mo)
+
+#else /* __LP64__ */
+
+/*
+ * On x86, the compiler generates either an FP-stack read/write, or an SSE2
+ * store/load to implement these 64-bit atomic operations. Since that's not
+ * feasible on kernel-land, we fallback to cmpxchg8b. Note that this means
+ * that 'atomic_load' cannot be used on a const pointer. However, if it's
+ * being accessed by an atomic operation, then it's very likely that it can
+ * also be modified, so it should be OK.
+ */
+
+#  define atomic_load_helper(ptr, mo)                                   \
+MACRO_BEGIN                                                             \
+    typeof(*(ptr)) __ret;                                               \
+                                                                        \
+    if (sizeof (__ret) != 8) {                                          \
+        __ret = __atomic_load_n((ptr), __ATOMIC_##mo);                  \
+    } else {                                                            \
+        /*                                                              \
+         * Use an 'unlikely' value, so that the atomic swap isn't       \
+         * actually executed most of the time.                          \
+         */                                                             \
+        __ret = 0xdeadbeefcafe;                                         \
+        __atomic_compare_exchange_n((ptr), &__ret, __ret, 0,            \
+                                    __ATOMIC_##mo, __ATOMIC_RELAXED);   \
+    }                                                                   \
+                                                                        \
+    __ret;                                                              \
+MACRO_END
+
+#  define atomic_store_helper(ptr, val, mo)                            \
+MACRO_BEGIN                                                            \
+    if (sizeof (*(ptr) != 8)) {                                        \
+        __atomic_store_n((ptr), (val), __ATOMIC_##mo);                 \
+    } else {                                                           \
+        typeof(ptr) __ptr;                                             \
+        typeof(val) __val, __exp;                                      \
+                                                                       \
+        __ptr = (uint64_t *)(ptr);                                     \
+        __val = (val);                                                 \
+        __exp = *__ptr;                                                \
+                                                                       \
+        while (!__atomic_compare_exchange_n(__ptr, &__exp, __val, 0,   \
+               __ATOMIC_##mo, __ATOMIC_RELAXED)) {                     \
+        }                                                              \
+                                                                       \
+    }                                                                  \
+MACRO_END
+
+#endif /* __LP64__ */
+
+#define atomic_load_acq(ptr)   atomic_load_helper((ptr), ACQUIRE)
+#define atomic_load_rel(ptr)   atomic_load_helper((ptr), RELEASE)
+#define atomic_load_cst(ptr)   atomic_load_helper((ptr), SEQ_CST)
+
+#define atomic_store_acq(ptr, val)   \
+    atomic_store_helper((ptr), (val), ACQUIRE)
+
+#define atomic_store_rel(ptr, val)   \
+    atomic_store_helper((ptr), (val), RELEASE)
+
+#define atomic_store_cst(ptr, val)   \
+    atomic_store_helper((ptr), (val), SEQ_CST)
+
+/*
+ * Local atomic operations. These are local to a processor, and can therefore
+ * elide the 'lock' prefix.
+ */
+
+#define latomic_cas_helper_bwl(ptr, exp, nval, pre, post)   \
+MACRO_BEGIN                                                 \
+    typeof(*(ptr)) __ret;                                   \
+                                                            \
+    pre;                                                    \
     asm volatile("cmpxchg %3, %0"                           \
-                 : "+m" (*(ptr)), "=a" (oldval)             \
-                 : "1" (predicate), "r" (newval)            \
-                 : "memory")
+                 : "+m" (*ptr), "=a" (__ret)                \
+                 : "1" (exp), "r" (nval)                    \
+                 : "memory");                               \
+                                                            \
+    post;                                                   \
+                                                            \
+    __ret;                                                  \
+MACRO_END
 
-static inline void
-atomic_add_uint(volatile unsigned int *ptr, int delta)
-{
-    ATOMIC_ADD(ptr, delta);
-}
+#ifdef __LP64__
+#  define latomic_cas_helper   latomic_cas_helper_bwl
 
-/*
- * Implies a full memory barrier.
- */
-static inline unsigned int
-atomic_fetchadd_uint(volatile unsigned int *ptr, int delta)
-{
-    unsigned int oldval;
-
-    ATOMIC_FETCHADD(ptr, oldval, delta);
-    return oldval;
-}
-
-static inline void
-atomic_and_uint(volatile unsigned int *ptr, unsigned int bits)
-{
-    ATOMIC_AND(ptr, bits);
-}
-
-static inline void
-atomic_or_uint(volatile unsigned int *ptr, unsigned int bits)
-{
-    ATOMIC_OR(ptr, bits);
-}
-
-static inline void
-atomic_xor_uint(volatile unsigned int *ptr, unsigned int bits)
-{
-    ATOMIC_XOR(ptr, bits);
-}
+#else /* __LP64__ */
 
 /*
- * Implies a full memory barrier.
+ * The compiler unconditionally uses the 'lock' prefix, so we have
+ * to implement the CAS operation manually here.
  */
-static inline unsigned int
-atomic_swap_uint(volatile unsigned int *ptr, unsigned int newval)
-{
-    unsigned int oldval;
 
-    ATOMIC_SWAP(ptr, oldval, newval);
-    return oldval;
-}
+#  define latomic_cas_helper(ptr, exp, nval, pre, post)             \
+MACRO_BEGIN                                                         \
+    typeof(*(ptr)) __r2;                                            \
+                                                                    \
+    if (sizeof (__r2) != 8) {                                       \
+        __r2 = latomic_cas_helper_bwl(ptr, exp, nval, pre, post);   \
+    } else {                                                        \
+        uint64_t  __v2;                                             \
+                                                                    \
+        __r2 = (exp);                                               \
+        __v2 = (nval);                                              \
+        pre;                                                        \
+        asm volatile("cmpxchg8b %0"                                 \
+                     : "+m" (*ptr), "+A" (__r2)                     \
+                     : "b" ((uint32_t)(__v2 & 0xffffffffu)),        \
+                       "c" ((uint32_t)(__v2 >> 32))                 \
+                     : "memory");                                   \
+        post;                                                       \
+                                                                    \
+    }                                                               \
+                                                                    \
+    __r2;                                                           \
+MACRO_END
 
-/*
- * Implies a full memory barrier.
- */
-static inline unsigned int
-atomic_cas_uint(volatile unsigned int *ptr, unsigned int predicate,
-                unsigned int newval)
-{
-    unsigned int oldval;
+#endif /* __LP64__ */
 
-    ATOMIC_CAS(ptr, oldval, predicate, newval);
-    return oldval;
-}
+#define latomic_cas_acq(ptr, exp, nval)   \
+    latomic_cas_helper(ptr, exp, nval, barrier(), (void)0)
 
-static inline void
-atomic_local_add_uint(volatile unsigned int *ptr, int delta)
-{
-    ATOMIC_LOCAL_ADD(ptr, delta);
-}
+#define latomic_cas_rel(ptr, exp, nval)   \
+    latomic_cas_helper(ptr, exp, nval, (void)0, barrier())
 
-/*
- * Implies a compiler barrier.
- */
-static inline unsigned int
-atomic_local_fetchadd_uint(volatile unsigned int *ptr, int delta)
-{
-    unsigned int oldval;
+#define latomic_cas_cst(ptr, exp, nval)   \
+    latomic_cas_helper(ptr, exp, nval, barrier(), barrier())
 
-    ATOMIC_LOCAL_FETCHADD(ptr, oldval, delta);
-    return oldval;
-}
+#define latomic_swap_helper_bwl(ptr, val, pre, post)   \
+MACRO_BEGIN                                            \
+    typeof(*(ptr)) __ret;                              \
+                                                       \
+    pre;                                               \
+    asm volatile("xchg %1, %0"                         \
+                 : "+m" (*ptr), "=r" (__ret)           \
+                 : "1" (val)                           \
+                 : "memory");                          \
+    post;                                              \
+                                                       \
+    __ret;                                             \
+MACRO_END
 
-static inline void
-atomic_local_and_uint(volatile unsigned int *ptr, unsigned int bits)
-{
-    ATOMIC_LOCAL_AND(ptr, bits);
-}
+#ifdef __LP64__
+#  define latomic_swap_helper   latomic_swap_helper_bwl
 
-static inline void
-atomic_local_or_uint(volatile unsigned int *ptr, unsigned int bits)
-{
-    ATOMIC_LOCAL_OR(ptr, bits);
-}
+#else /* __LP64__ */
 
-static inline void
-atomic_local_xor_uint(volatile unsigned int *ptr, unsigned int bits)
-{
-    ATOMIC_LOCAL_XOR(ptr, bits);
-}
+/* same deal with latomic_swap as with latomic_cas */
 
-/*
- * Implies a compiler barrier.
- */
-static inline unsigned int
-atomic_local_swap_uint(volatile unsigned int *ptr, unsigned int newval)
-{
-    unsigned int oldval;
+#  define latomic_swap_helper(ptr, val, pre, post)                       \
+MACRO_BEGIN                                                              \
+    typeof(*(ptr)) __r2;                                                 \
+                                                                         \
+    if (sizeof(__r2) != 8) {                                             \
+        __r2 = latomic_swap_helper_bwl(ptr, val, pre, post);             \
+    } else {                                                             \
+        typeof(__r2) __val;                                              \
+        typeof(ptr) __ptr;                                               \
+        char __done;                                                     \
+                                                                         \
+        __ptr = (ptr);                                                   \
+        __val = (val);                                                   \
+                                                                         \
+        do {                                                             \
+            pre;                                                         \
+            __r2 = *__ptr;                                               \
+            asm volatile("cmpxchg8b %0; setz %1"                         \
+                         : "+m" (*__ptr), "=a" (__done)                  \
+                         : "A" (__r2), "c" ((uint32_t)(__val >> 32)),    \
+                           "b" ((uint32_t)(__val & 0xffffffffu))         \
+                         : "memory");                                    \
+            post;                                                        \
+        } while (!__done);                                               \
+                                                                         \
+    }                                                                    \
+    __r2;                                                                \
+MACRO_END
 
-    ATOMIC_LOCAL_SWAP(ptr, oldval, newval);
-    return oldval;
-}
+#endif /* __LP64__ */
 
-/*
- * Implies a compiler barrier.
- */
-static inline unsigned int
-atomic_local_cas_uint(volatile unsigned int *ptr, unsigned int predicate,
-                      unsigned int newval)
-{
-    unsigned int oldval;
+#define latomic_swap_acq(ptr, val)   \
+    latomic_swap_helper(ptr, val, barrier(), (void)0)
 
-    ATOMIC_LOCAL_CAS(ptr, oldval, predicate, newval);
-    return oldval;
-}
+#define latomic_swap_rel(ptr, val)   \
+    latomic_swap_helper(ptr, val, (void)0, barrier())
 
-static inline void
-atomic_add_ulong(volatile unsigned long *ptr, long delta)
-{
-    ATOMIC_ADD(ptr, delta);
-}
+#define latomic_swap_cst(ptr, val)   \
+    latomic_swap_helper(ptr, val, barrier(), barrier())
 
-/*
- * Implies a full memory barrier.
- */
-static inline unsigned long
-atomic_fetchadd_ulong(volatile unsigned long *ptr, long delta)
-{
-    unsigned long oldval;
+#define latomic_fetch_add_helper(ptr, val)     \
+MACRO_BEGIN                                    \
+    typeof(*(ptr)) __ret;                      \
+                                               \
+    asm volatile("xadd %1, %0"                 \
+                 : "+m" (*ptr), "=r" (__ret)   \
+                 : "1" (val));                 \
+                                               \
+    __ret;                                     \
+MACRO_END
 
-    ATOMIC_FETCHADD(ptr, oldval, delta);
-    return oldval;
-}
+#define latomic_add_helper(ptr, val, ret)      \
+MACRO_BEGIN                                    \
+    asm volatile("add %1, %0"                  \
+                 : "+m" (*ptr) : "r" (val));   \
+    ret;                                       \
+MACRO_END
 
-static inline void
-atomic_and_ulong(volatile unsigned long *ptr, unsigned long bits)
-{
-    ATOMIC_AND(ptr, bits);
-}
+#define latomic_and_helper(ptr, val, ret)      \
+MACRO_BEGIN                                    \
+    asm volatile("and %1, %0"                  \
+                 : "+m" (*ptr) : "r" (val));   \
+    ret;                                       \
+MACRO_END
 
-static inline void
-atomic_or_ulong(volatile unsigned long *ptr, unsigned long bits)
-{
-    ATOMIC_OR(ptr, bits);
-}
+#define latomic_or_helper(ptr, val, ret)       \
+MACRO_BEGIN                                    \
+    asm volatile("or %1, %0"                   \
+                 : "+m" (*ptr) : "r" (val));   \
+    ret;                                       \
+MACRO_END
 
-static inline void
-atomic_xor_ulong(volatile unsigned long *ptr, unsigned long bits)
-{
-    ATOMIC_XOR(ptr, bits);
-}
+#define latomic_xor_helper(ptr, val)           \
+MACRO_BEGIN                                    \
+    asm volatile("xor %1, %0"                  \
+                 : "+m" (*ptr) : "r" (val));   \
+    ret;                                       \
+MACRO_END
 
-/*
- * Implies a full memory barrier.
- */
-static inline unsigned long
-atomic_swap_ulong(volatile unsigned long *ptr, unsigned long newval)
-{
-    unsigned long oldval;
+#ifdef __LP64__
+#  define latomic_fetch_add(ptr, val)   \
+       latomic_fetch_add_helper(ptr, val, (void)0)
 
-    ATOMIC_SWAP(ptr, oldval, newval);
-    return oldval;
-}
+#  define latomic_add(ptr, val)   \
+       latomic_add_helper(ptr, val, (void)0)
 
-/*
- * Implies a full memory barrier.
- */
-static inline unsigned long
-atomic_cas_ulong(volatile unsigned long *ptr, unsigned long predicate,
-                 unsigned long newval)
-{
-    unsigned long oldval;
+#  define latomic_and(ptr, val)   \
+       latomic_and_helper(ptr, val, (void)0)
 
-    ATOMIC_CAS(ptr, oldval, predicate, newval);
-    return oldval;
-}
+#  define latomic_or(ptr, val)   \
+       latomic_or_helper(ptr, val, (void)0)
 
-static inline void
-atomic_local_add_ulong(volatile unsigned long *ptr, long delta)
-{
-    ATOMIC_LOCAL_ADD(ptr, delta);
-}
+#  define latomic_xor(ptr, val)   \
+       latomic_xor_helper(ptr, val, (void)0)
 
-/*
- * Implies a compiler barrier.
- */
-static inline unsigned long
-atomic_local_fetchadd_ulong(volatile unsigned long *ptr, long delta)
-{
-    unsigned long oldval;
+#else /* __LP64__ */
 
-    ATOMIC_LOCAL_FETCHADD(ptr, oldval, delta);
-    return oldval;
-}
+#  define latomic_op(ptr, val, op, mo, simple)  \
+MACRO_BEGIN                                                               \
+    typeof(*(ptr)) __r2;                                                  \
+    if (sizeof(__r2) != 8) {                                              \
+        __r2 = simple(ptr, val);                                          \
+    } else {                                                              \
+        typeof(ptr) __ptr;                                                \
+        typeof(*(ptr)) __val;                                             \
+                                                                          \
+        __ptr = (ptr);                                                    \
+        __val = (val);                                                    \
+                                                                          \
+        do {                                                              \
+            __r2 = *__ptr;                                                \
+        } while (atomic_cas_##mo (__ptr, __r2, __r2 op __val) != __r2);   \
+    }                                                                     \
+                                                                          \
+    __r2;                                                                 \
+MACRO_END
 
-static inline void
-atomic_local_and_ulong(volatile unsigned long *ptr, unsigned long bits)
-{
-    ATOMIC_LOCAL_AND(ptr, bits);
-}
+#  define latomic_fetch_add(ptr, val)   \
+       latomic_op(ptr, val, +, cst, latomic_fetch_add_helper)
 
-static inline void
-atomic_local_or_ulong(volatile unsigned long *ptr, unsigned long bits)
-{
-    ATOMIC_LOCAL_OR(ptr, bits);
-}
+#  define latomic_add(ptr, val)   \
+       ((void) latomic_op(ptr, val, +, acq, latomic_fetch_add_helper))
 
-static inline void
-atomic_local_xor_ulong(volatile unsigned long *ptr, unsigned long bits)
-{
-    ATOMIC_LOCAL_XOR(ptr, bits);
-}
+#  define latomic_and_2(ptr, val)   latomic_and_helper(ptr, val, 0)
+#  define latomic_and(ptr, val)   \
+       ((void) latomic_op(ptr, val, &, acq, latomic_and_2))
 
-/*
- * Implies a compiler barrier.
- */
-static inline unsigned long
-atomic_local_swap_ulong(volatile unsigned long *ptr, unsigned long newval)
-{
-    unsigned long oldval;
+#  define latomic_or_2(ptr, val)   latomic_or_helper(ptr, val, 0)
+#  define latomic_or(ptr, val)   \
+       ((void) latomic_op(ptr, val, |, acq, latomic_or_2))
 
-    ATOMIC_LOCAL_SWAP(ptr, oldval, newval);
-    return oldval;
-}
+#  define latomic_xor_2(ptr, val)   latomic_xor_helper(ptr, val, 0)
+#  define latomic_xor(ptr, val)   \
+       ((void) latomic_op(ptr, val, ^, acq, latomic_xor_2))
 
-/*
- * Implies a compiler barrier.
- */
-static inline unsigned long
-atomic_local_cas_ulong(volatile unsigned long *ptr, unsigned long predicate,
-                       unsigned long newval)
-{
-    unsigned long oldval;
+#endif /* __LP64__ */
 
-    ATOMIC_LOCAL_CAS(ptr, oldval, predicate, newval);
-    return oldval;
-}
-
-static inline void
-atomic_add_uintptr(volatile uintptr_t *ptr, intptr_t delta)
-{
-    ATOMIC_ADD(ptr, delta);
-}
-
-/*
- * Implies a full memory barrier.
- */
-static inline uintptr_t
-atomic_fetchadd_uintptr(volatile uintptr_t *ptr, intptr_t delta)
-{
-    uintptr_t oldval;
-
-    ATOMIC_FETCHADD(ptr, oldval, delta);
-    return oldval;
-}
-
-static inline void
-atomic_and_uintptr(volatile uintptr_t *ptr, uintptr_t bits)
-{
-    ATOMIC_AND(ptr, bits);
-}
-
-static inline void
-atomic_or_uintptr(volatile uintptr_t *ptr, uintptr_t bits)
-{
-    ATOMIC_OR(ptr, bits);
-}
-
-static inline void
-atomic_xor_uintptr(volatile uintptr_t *ptr, uintptr_t bits)
-{
-    ATOMIC_XOR(ptr, bits);
-}
-
-/*
- * Implies a full memory barrier.
- */
-static inline uintptr_t
-atomic_swap_uintptr(volatile uintptr_t *ptr, uintptr_t newval)
-{
-    uintptr_t oldval;
-
-    ATOMIC_SWAP(ptr, oldval, newval);
-    return oldval;
-}
-
-/*
- * Implies a full memory barrier.
- */
-static inline uintptr_t
-atomic_cas_uintptr(volatile uintptr_t *ptr, uintptr_t predicate,
-                   uintptr_t newval)
-{
-    uintptr_t oldval;
-
-    ATOMIC_CAS(ptr, oldval, predicate, newval);
-    return oldval;
-}
-
-static inline void
-atomic_local_add_uintptr(volatile uintptr_t *ptr, intptr_t delta)
-{
-    ATOMIC_LOCAL_ADD(ptr, delta);
-}
-
-/*
- * Implies a compiler barrier.
- */
-static inline uintptr_t
-atomic_local_fetchadd_uintptr(volatile uintptr_t *ptr, intptr_t delta)
-{
-    uintptr_t oldval;
-
-    ATOMIC_LOCAL_FETCHADD(ptr, oldval, delta);
-    return oldval;
-}
-
-static inline void
-atomic_local_and_uintptr(volatile uintptr_t *ptr, uintptr_t bits)
-{
-    ATOMIC_LOCAL_AND(ptr, bits);
-}
-
-static inline void
-atomic_local_or_uintptr(volatile uintptr_t *ptr, uintptr_t bits)
-{
-    ATOMIC_LOCAL_OR(ptr, bits);
-}
-
-static inline void
-atomic_local_xor_uintptr(volatile uintptr_t *ptr, uintptr_t bits)
-{
-    ATOMIC_LOCAL_XOR(ptr, bits);
-}
-
-/*
- * Implies a compiler barrier.
- */
-static inline uintptr_t
-atomic_local_swap_uintptr(volatile uintptr_t *ptr, uintptr_t newval)
-{
-    uintptr_t oldval;
-
-    ATOMIC_LOCAL_SWAP(ptr, oldval, newval);
-    return oldval;
-}
-
-/*
- * Implies a compiler barrier.
- */
-static inline uintptr_t
-atomic_local_cas_uintptr(volatile uintptr_t *ptr, uintptr_t predicate,
-                         uintptr_t newval)
-{
-    uintptr_t oldval;
-
-    ATOMIC_LOCAL_CAS(ptr, oldval, predicate, newval);
-    return oldval;
-}
+/* Both x86 and x86_64 can use atomic operations on 64-bit values. */
+#define X15_HAVE_64B_ATOMIC
 
 #endif /* _X86_ATOMIC_H */

@@ -29,13 +29,7 @@
 static void
 rtmutex_set_contended(struct rtmutex *rtmutex)
 {
-    uintptr_t owner, prev_owner;
-
-    do {
-        owner = rtmutex->owner;
-        prev_owner = atomic_cas_uintptr(&rtmutex->owner, owner,
-                                        owner | RTMUTEX_CONTENDED);
-    } while (prev_owner != owner);
+    atomic_or(&rtmutex->owner, RTMUTEX_CONTENDED);
 }
 
 void
@@ -55,7 +49,7 @@ rtmutex_lock_slow(struct rtmutex *rtmutex)
     bits = RTMUTEX_CONTENDED;
 
     for (;;) {
-        prev_owner = atomic_cas_uintptr(&rtmutex->owner, bits, owner | bits);
+        prev_owner = atomic_cas_acq(&rtmutex->owner, bits, owner | bits);
         assert((prev_owner & bits) == bits);
 
         if (prev_owner == bits) {
@@ -70,7 +64,7 @@ rtmutex_lock_slow(struct rtmutex *rtmutex)
     turnstile_own(turnstile);
 
     if (turnstile_empty(turnstile)) {
-        prev_owner = atomic_swap_uintptr(&rtmutex->owner, owner);
+        prev_owner = atomic_swap_acq(&rtmutex->owner, owner);
         assert(prev_owner == (owner | bits));
     }
 
@@ -95,7 +89,7 @@ rtmutex_unlock_slow(struct rtmutex *rtmutex)
     turnstile = turnstile_acquire(rtmutex);
     assert(turnstile != NULL);
 
-    prev_owner = atomic_swap_uintptr(&rtmutex->owner,
+    prev_owner = atomic_swap_rel(&rtmutex->owner,
                                      RTMUTEX_FORCE_WAIT | RTMUTEX_CONTENDED);
     assert((prev_owner & RTMUTEX_OWNER_MASK) == owner);
 
