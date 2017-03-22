@@ -18,10 +18,10 @@
 #ifndef _KERN_SPINLOCK_I_H
 #define _KERN_SPINLOCK_I_H
 
+#include <kern/atomic.h>
 #include <kern/assert.h>
 #include <kern/error.h>
 #include <kern/spinlock_types.h>
-#include <machine/atomic.h>
 #include <machine/cpu.h>
 
 static inline int
@@ -29,7 +29,7 @@ spinlock_tryacquire(struct spinlock *lock)
 {
     unsigned int state;
 
-    state = atomic_swap_uint(&lock->locked, 1);
+    state = atomic_swap(&lock->locked, 1, MO_ACQUIRE);
 
     if (state == 0) {
         return 0;
@@ -59,7 +59,7 @@ spinlock_release(struct spinlock *lock)
 {
     unsigned int locked;
 
-    locked = atomic_swap_uint(&lock->locked, 0);
+    locked = atomic_swap(&lock->locked, 0, MO_RELEASE);
     assert(locked);
 }
 

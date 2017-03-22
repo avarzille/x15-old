@@ -28,7 +28,7 @@
 
 #include <kern/bitmap_i.h>
 #include <kern/limits.h>
-#include <machine/atomic.h>
+#include <kern/atomic.h>
 
 #define BITMAP_DECLARE(name, nr_bits) unsigned long name[BITMAP_LONGS(nr_bits)]
 
@@ -78,7 +78,7 @@ bitmap_set_atomic(unsigned long *bm, int bit)
         bitmap_lookup(bm, bit);
     }
 
-    atomic_or_ulong(bm, bitmap_mask(bit));
+    atomic_or(bm, bitmap_mask(bit), MO_ACQ_REL);
 }
 
 static inline void
@@ -98,7 +98,7 @@ bitmap_clear_atomic(unsigned long *bm, int bit)
         bitmap_lookup(bm, bit);
     }
 
-    atomic_and_ulong(bm, ~bitmap_mask(bit));
+    atomic_and(bm, ~bitmap_mask(bit), MO_ACQ_REL);
 }
 
 static inline int
