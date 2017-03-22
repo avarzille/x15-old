@@ -2723,7 +2723,7 @@ thread_key_create(unsigned int *keyp, thread_dtor_fn_t dtor)
 {
     unsigned int key;
 
-    key = atomic_fetch_add(&thread_nr_keys, 1);
+    key = atomic_fetchadd_uint(&thread_nr_keys, 1);
 
     if (key >= THREAD_KEYS_MAX) {
         panic("thread: maximum number of keys exceeded");
