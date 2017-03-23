@@ -57,7 +57,7 @@ void syscnt_setup(void);
  */
 void syscnt_register(struct syscnt *syscnt, const char *name);
 
-#ifdef X15_HAVE_64B_ATOMIC
+#ifdef ARCH_HAVE_64B_ATOMIC
 
 static inline void
 syscnt_add(struct syscnt *syscnt, int64_t delta)
@@ -71,7 +71,7 @@ syscnt_read(const struct syscnt *syscnt)
     return atomic_load((uint64_t *)&syscnt->value, MO_RELAXED);
 }
 
-#else /* X15_HAVE_64B_ATOMIC */
+#else /* ARCH_HAVE_64B_ATOMIC */
 
 static inline void
 syscnt_add(struct syscnt *syscnt, int64_t delta)
@@ -96,7 +96,7 @@ syscnt_read(struct syscnt *syscnt)
     return value;
 }
 
-#endif /* X15_HAVE_64B_ATOMIC */
+#endif /* ARCH_HAVE_64B_ATOMIC */
 
 static inline void
 syscnt_inc(struct syscnt *syscnt)

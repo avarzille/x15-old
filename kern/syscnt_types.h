@@ -31,7 +31,7 @@
  * on 32-bits ones.
  */
 struct syscnt {
-#ifndef X15_HAVE_64B_ATOMIC
+#ifndef ARCH_HAVE_64B_ATOMIC
     struct spinlock lock;
 #endif /* __LP64__ */
 

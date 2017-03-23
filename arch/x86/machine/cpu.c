@@ -538,6 +538,12 @@ cpu_check(const struct cpu *cpu)
     if (!(cpu->features2 & CPU_FEATURE2_APIC)) {
         cpu_panic_on_missing_feature("apic");
     }
+
+#ifndef __LP64__
+    if (!(cpu->features2 & CPU_FEATURE2_CAS8B)) {
+        cpu_panic_on_missing_feature("cmpxchg8b");
+    }
+#endif
 }
 
 void
