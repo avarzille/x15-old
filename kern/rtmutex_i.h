@@ -57,7 +57,7 @@ rtmutex_tryacquire(struct rtmutex *rtmutex)
 
     owner = (uintptr_t)thread_self();
     rtmutex_assert_owner_aligned(owner);
-    return atomic_cas(&rtmutex->owner, 0, owner, MO_ACQUIRE);
+    return atomic_cas_acquire(&rtmutex->owner, 0, owner);
 }
 
 static inline uintptr_t
@@ -67,7 +67,7 @@ rtmutex_tryrelease(struct rtmutex *rtmutex)
 
     owner = (uintptr_t)thread_self();
     rtmutex_assert_owner_aligned(owner);
-    prev_owner = atomic_cas(&rtmutex->owner, owner, 0, MO_RELEASE);
+    prev_owner = atomic_cas_release(&rtmutex->owner, owner, 0);
     assert((prev_owner & RTMUTEX_OWNER_MASK) == owner);
     return prev_owner;
 }

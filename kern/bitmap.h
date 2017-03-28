@@ -78,7 +78,7 @@ bitmap_set_atomic(unsigned long *bm, int bit)
         bitmap_lookup(bm, bit);
     }
 
-    atomic_or(bm, bitmap_mask(bit), MO_ACQ_REL);
+    atomic_or_acqrel(bm, bitmap_mask(bit));
 }
 
 static inline void
@@ -98,7 +98,7 @@ bitmap_clear_atomic(unsigned long *bm, int bit)
         bitmap_lookup(bm, bit);
     }
 
-    atomic_and(bm, ~bitmap_mask(bit), MO_ACQ_REL);
+    atomic_and_acqrel(bm, ~bitmap_mask(bit));
 }
 
 static inline int

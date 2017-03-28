@@ -270,7 +270,7 @@ thread_ref(struct thread *thread)
 {
     unsigned long nr_refs;
 
-    nr_refs = atomic_fetch_add(&thread->nr_refs, 1, MO_ACQUIRE);
+    nr_refs = atomic_fetch_add(&thread->nr_refs, 1, ATOMIC_ACQUIRE);
     assert(nr_refs != (unsigned long)-1);
 }
 
@@ -279,7 +279,7 @@ thread_unref(struct thread *thread)
 {
     unsigned long nr_refs;
 
-    nr_refs = atomic_fetch_add(&thread->nr_refs, -1, MO_RELEASE);
+    nr_refs = atomic_fetch_sub(&thread->nr_refs, 1, ATOMIC_RELEASE);
     assert(nr_refs != 0);
 
     if (nr_refs == 1) {

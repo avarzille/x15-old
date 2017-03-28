@@ -29,7 +29,7 @@ spinlock_tryacquire(struct spinlock *lock)
 {
     unsigned int state;
 
-    state = atomic_swap(&lock->locked, 1, MO_ACQUIRE);
+    state = atomic_swap_acquire(&lock->locked, 1);
 
     if (state == 0) {
         return 0;
@@ -59,7 +59,7 @@ spinlock_release(struct spinlock *lock)
 {
     unsigned int locked;
 
-    locked = atomic_swap(&lock->locked, 0, MO_RELEASE);
+    locked = atomic_swap_release(&lock->locked, 0);
     assert(locked);
 }
 

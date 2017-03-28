@@ -21,8 +21,8 @@
 #ifndef X15_MUTEX_PI
 
 #include <kern/assert.h>
-#include <kern/mutex_types.h>
 #include <kern/atomic.h>
+#include <kern/mutex_types.h>
 
 #define MUTEX_UNLOCKED  0
 #define MUTEX_LOCKED    1
@@ -31,7 +31,7 @@
 static inline unsigned int
 mutex_tryacquire(struct mutex *mutex)
 {
-    return atomic_cas(&mutex->state, MUTEX_UNLOCKED, MUTEX_LOCKED, MO_ACQUIRE);
+    return atomic_cas_acquire(&mutex->state, MUTEX_UNLOCKED, MUTEX_LOCKED);
 }
 
 static inline unsigned int
@@ -39,7 +39,7 @@ mutex_release(struct mutex *mutex)
 {
     unsigned int state;
 
-    state = atomic_swap(&mutex->state, MUTEX_UNLOCKED, MO_RELEASE);
+    state = atomic_swap_release(&mutex->state, MUTEX_UNLOCKED);
     assert((state == MUTEX_LOCKED) || (state == MUTEX_CONTENDED));
     return state;
 }

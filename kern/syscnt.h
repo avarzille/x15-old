@@ -62,13 +62,13 @@ void syscnt_register(struct syscnt *syscnt, const char *name);
 static inline void
 syscnt_add(struct syscnt *syscnt, int64_t delta)
 {
-    atomic_add(&syscnt->value, delta, MO_ACQ_REL);
+    atomic_add(&syscnt->value, delta, ATOMIC_ACQ_REL);
 }
 
 static inline uint64_t
 syscnt_read(const struct syscnt *syscnt)
 {
-    return atomic_load((uint64_t *)&syscnt->value, MO_RELAXED);
+    return atomic_load((uint64_t *)&syscnt->value, ATOMIC_RELAXED);
 }
 
 #else /* ARCH_HAVE_64B_ATOMIC */

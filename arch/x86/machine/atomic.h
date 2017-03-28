@@ -44,22 +44,22 @@
 
 #define atomic_load(ptr, mo)                                              \
 MACRO_BEGIN                                                               \
-    typeof(*(ptr)) ___reg;                                                \
+    typeof(*(ptr)) ___ret;                                                \
                                                                           \
-    if (sizeof (___reg) != 8) {                                           \
-        ___reg = __atomic_load_n((ptr), mo);                              \
+    if (sizeof(___ret) != 8) {                                            \
+        ___ret = __atomic_load_n((ptr), mo);                              \
     } else {                                                              \
-        ___reg = 0;                                                       \
-        __atomic_compare_exchange_n((uint64_t *)(ptr), &___reg, ___reg,   \
+        ___ret = 0;                                                       \
+        __atomic_compare_exchange_n((uint64_t *)(ptr), &___ret, ___ret,   \
                                     0, mo, __ATOMIC_RELAXED);             \
     }                                                                     \
                                                                           \
-    ___reg;                                                               \
+    ___ret;                                                               \
 MACRO_END
 
 #define atomic_store(ptr, val, mo)                                        \
 MACRO_BEGIN                                                               \
-    if (sizeof (*(ptr) != 8)) {                                           \
+    if (sizeof(*(ptr) != 8)) {                                            \
         __atomic_store_n((ptr), (val), mo);                               \
     } else {                                                              \
         typeof(ptr) ___ptr;                                               \
@@ -79,29 +79,29 @@ MACRO_END
 #endif /* __LP64__ */
 
 /* notify the generic header that we implemented loads and stores */
-#define ARCH_ATOMIC_LOAD
-#define ARCH_ATOMIC_STORE
+#define ATOMIC_LOAD_DEFINED
+#define ATOMIC_STORE_DEFINED
 
 #define atomic_mb_pre(mo)   \
-  (mo == MO_ACQUIRE || mo == MO_ACQ_REL ? mb_load() :   \
-      mo == MO_SEQ_CST ? mb_sync() : (void)0)
+  (mo == ATOMIC_ACQUIRE || mo == ATOMIC_ACQ_REL ? mb_load() :   \
+      mo == ATOMIC_SEQ_CST ? mb_sync() : (void)0)
 
 #define atomic_mb_post(mo)   \
-  (mo == MO_RELEASE || mo == MO_ACQ_REL ? mb_store() :   \
-      mo == MO_SEQ_CST ? mb_sync() : (void)0)
+  (mo == ATOMIC_RELEASE || mo == ATOMIC_ACQ_REL ? mb_store() :   \
+      mo == ATOMIC_SEQ_CST ? mb_sync() : (void)0)
 
 #define latomic_cas_helper(ptr, exp, nval, mo)   \
 MACRO_BEGIN                                      \
-    typeof(*(ptr)) ___reg;                       \
+    typeof(*(ptr)) ___ret;                       \
                                                  \
     atomic_mb_pre(mo);                           \
     asm volatile("cmpxchg %3, %0"                \
-                 : "+m" (*ptr), "=a" (___reg)    \
+                 : "+m" (*ptr), "=a" (___ret)    \
                  : "1" (exp), "r" (nval)         \
                  : "memory");                    \
                                                  \
     atomic_mb_post(mo);                          \
-    ___reg;                                      \
+    ___ret;                                      \
 MACRO_END
 
 #ifdef __LP64__
@@ -122,19 +122,19 @@ MACRO_END
 MACRO_BEGIN                                                    \
     typeof(*(ptr)) ___r2;                                      \
                                                                \
-    if (sizeof (___r2) != 8) {                                 \
+    if (sizeof(___r2) != 8) {                                  \
         ___r2 = latomic_cas_helper(ptr, exp, nval, mo);        \
     } else {                                                   \
-        uint64_t  __v2;                                        \
+        uint64_t  ___v2;                                       \
                                                                \
         ___r2 = (exp);                                         \
-        __v2 = (nval);                                         \
+        ___v2 = (nval);                                        \
                                                                \
         atomic_mb_pre(mo);                                     \
         asm volatile("cmpxchg8b %0"                            \
                      : "+m" (*ptr), "+A" (___r2)               \
-                     : "b" ((uint32_t)(__v2 & 0xffffffffu)),   \
-                       "c" ((uint32_t)(__v2 >> 32))            \
+                     : "b" ((uint32_t)(___v2 & 0xffffffff)),   \
+                       "c" ((uint32_t)(___v2 >> 32))           \
                      : "memory");                              \
         atomic_mb_post(mo);                                    \
     }                                                          \
@@ -163,7 +163,7 @@ MACRO_BEGIN                                                               \
             asm volatile("cmpxchg8b %0; setz %1"                          \
                          : "+m" (*___ptr), "=a" (___done)                 \
                          : "A" (___r2), "c" ((uint32_t)(___val >> 32)),   \
-                           "b" ((uint32_t)(___val & 0xffffffffu))         \
+                           "b" ((uint32_t)(___val & 0xffffffff))          \
                          : "memory");                                     \
                                                                           \
         } while (!___done);                                               \
@@ -177,15 +177,15 @@ MACRO_END
 
 #define latomic_fetch_add_helper(ptr, val, mo)   \
 MACRO_BEGIN                                      \
-    typeof(*(ptr)) ___reg;                       \
+    typeof(*(ptr)) ___ret;                       \
                                                  \
     atomic_mb_pre(mo);                           \
     asm volatile("xadd %1, %0"                   \
-                 : "+m" (*ptr), "=r" (___reg)    \
+                 : "+m" (*ptr), "=r" (___ret)    \
                  : "1" (val));                   \
                                                  \
     atomic_mb_post(mo);                          \
-    ___reg;                                      \
+    ___ret;                                      \
 MACRO_END
 
 #define latomic_add_helper(ptr, val, mo, ret)   \
@@ -258,8 +258,8 @@ MACRO_BEGIN                                                     \
                                                                 \
         do {                                                    \
             ___r3 = *___ptr;                                    \
-        } while (latomic_cas (___ptr, ___r3,                    \
-                              ___r3 op ___val, mo) != ___r3);   \
+        } while (latomic_cas(___ptr, ___r3,                     \
+                             ___r3 op ___val, mo) != ___r3);    \
     }                                                           \
                                                                 \
     ___r3;                                                      \
@@ -286,9 +286,9 @@ MACRO_END
 #endif /* __LP64__ */
 
 /* Both x86 and x86_64 can use atomic operations on 64-bit values */
-#define ARCH_HAVE_64B_ATOMIC
+#define ATOMIC_HAVE_64B_OPS
 
 /* x86 has local atomic operations */
-#define ARCH_HAVE_LOCAL_ATOMICS
+#define ATOMIC_HAVE_LOCAL_OPS
 
 #endif /* _X86_ATOMIC_H */
