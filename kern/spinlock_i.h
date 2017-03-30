@@ -18,8 +18,8 @@
 #ifndef _KERN_SPINLOCK_I_H
 #define _KERN_SPINLOCK_I_H
 
-#include <kern/atomic.h>
 #include <kern/assert.h>
+#include <kern/atomic.h>
 #include <kern/error.h>
 #include <kern/spinlock_types.h>
 #include <machine/cpu.h>
