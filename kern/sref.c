@@ -259,13 +259,13 @@ sref_weakref_init(struct sref_weakref *weakref, struct sref_counter *counter)
 static void
 sref_weakref_mark_dying(struct sref_weakref *weakref)
 {
-    atomic_or_acqrel(&weakref->addr, SREF_WEAKREF_DYING);
+    atomic_or_acq_rel(&weakref->addr, SREF_WEAKREF_DYING);
 }
 
 static void
 sref_weakref_clear_dying(struct sref_weakref *weakref)
 {
-    atomic_and_acqrel(&weakref->addr, SREF_WEAKREF_MASK);
+    atomic_and_acq_rel(&weakref->addr, SREF_WEAKREF_MASK);
 }
 
 static int

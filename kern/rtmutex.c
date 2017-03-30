@@ -29,7 +29,7 @@
 static void
 rtmutex_set_contended(struct rtmutex *rtmutex)
 {
-    atomic_or_acqrel(&rtmutex->owner, RTMUTEX_CONTENDED);
+    atomic_or_acq_rel(&rtmutex->owner, RTMUTEX_CONTENDED);
 }
 
 void

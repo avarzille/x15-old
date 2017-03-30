@@ -20,14 +20,19 @@
 
 #include <machine/atomic.h>
 
-/* Supported memory orders */
+/*
+ * Supported memory orders.
+ */
+
 #define ATOMIC_RELAXED   __ATOMIC_RELAXED
 #define ATOMIC_ACQUIRE   __ATOMIC_ACQUIRE
 #define ATOMIC_RELEASE   __ATOMIC_RELEASE
 #define ATOMIC_ACQ_REL   __ATOMIC_ACQ_REL
 #define ATOMIC_SEQ_CST   __ATOMIC_SEQ_CST
 
-/* Type-generic atomic operations */
+/*
+ * Type-generic atomic operations.
+ */
 
 #define atomic_fetch_add(ptr, val, mo)   __atomic_fetch_add((ptr), (val), mo)
 
@@ -55,7 +60,12 @@
  * For compare-and-swap, we deviate a little from the standard, and only
  * return the value before the comparison, leaving it up to the user to
  * determine whether the swap was actually performed or not.
+ * Also, note that the memory order in case of failure is relaxed. This is
+ * because atomic CAS is typically used in a loop. However, if a different
+ * code path is taken on failure (rather than retrying), then the user
+ * should be aware that a memory fence might be necessary.
  */
+
 #define atomic_cas(ptr, exp, nval, mo)                            \
 MACRO_BEGIN                                                       \
     typeof(*(ptr)) ___exp, ___nval;                               \
@@ -63,7 +73,7 @@ MACRO_BEGIN                                                       \
     ___exp = (exp);                                               \
     ___nval = (nval);                                             \
     __atomic_compare_exchange_n((ptr), &___exp, ___nval, 0, mo,   \
-                                __ATOMIC_RELAXED);                \
+                                ATOMIC_RELAXED);                  \
     ___exp;                                                       \
 MACRO_END
 
@@ -81,41 +91,30 @@ MACRO_END
 #define atomic_store(ptr, val, mo)   __atomic_store_n((ptr), (val), mo)
 #endif /* ATOMIC_STORE_DEFINED */
 
-/* If no local atomics were defined, alias them to the generic ones */
+/*
+ * Common shortcuts.
+ */
 
-#ifndef ATOMIC_HAVE_LOCAL_OPS
-
-#define latomic_cas         atomic_cas
-#define latomic_swap        atomic_swap
-#define latomic_fetch_add   atomic_fetch_add
-#define latomic_add         atomic_add
-#define latomic_and         atomic_and
-#define latomic_or          atomic_or
-#define latomic_xor         atomic_xor
-
-#endif /* ATOMIC_HAVE_LOCAL_OPS */
-
-/* Common shortcuts */
 #define atomic_cas_acquire(ptr, exp, val)   \
     atomic_cas(ptr, exp, val, ATOMIC_ACQUIRE)
 
 #define atomic_cas_release(ptr, exp, val)   \
     atomic_cas(ptr, exp, val, ATOMIC_RELEASE)
 
-#define atomic_cas_seqcst(ptr, exp, val)   \
+#define atomic_cas_seq_cst(ptr, exp, val)   \
     atomic_cas(ptr, exp, val, ATOMIC_SEQ_CST)
 
 #define atomic_swap_acquire(ptr, val)   atomic_swap(ptr, val, ATOMIC_ACQUIRE)
 #define atomic_swap_release(ptr, val)   atomic_swap(ptr, val, ATOMIC_RELEASE)
-#define atomic_swap_seqcst(ptr, val)    atomic_swap(ptr, val, ATOMIC_SEQ_CST)
+#define atomic_swap_seq_cst(ptr, val)   atomic_swap(ptr, val, ATOMIC_SEQ_CST)
 
-#define atomic_fetch_add_acqrel(ptr, val)   \
+#define atomic_fetch_add_acq_rel(ptr, val)   \
     atomic_fetch_add(ptr, val, ATOMIC_ACQ_REL)
 
-#define atomic_fetch_sub_acqrel(ptr, val)   \
+#define atomic_fetch_sub_acq_rel(ptr, val)   \
     atomic_fetch_sub(ptr, val, ATOMIC_ACQ_REL)
 
-#define atomic_or_acqrel(ptr, val)    atomic_or(ptr, val, ATOMIC_ACQ_REL)
-#define atomic_and_acqrel(ptr, val)   atomic_and(ptr, val, ATOMIC_ACQ_REL)
+#define atomic_or_acq_rel(ptr, val)    atomic_or(ptr, val, ATOMIC_ACQ_REL)
+#define atomic_and_acq_rel(ptr, val)   atomic_and(ptr, val, ATOMIC_ACQ_REL)
 
 #endif /* _KERN_ATOMIC_H */

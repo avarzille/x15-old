@@ -195,13 +195,13 @@ void thread_destroy(struct thread *thread);
 static inline void
 thread_set_flag(struct thread *thread, unsigned long flag)
 {
-    atomic_or_acqrel(&thread->flags, flag);
+    atomic_or_acq_rel(&thread->flags, flag);
 }
 
 static inline void
 thread_clear_flag(struct thread *thread, unsigned long flag)
 {
-    atomic_and_acqrel(&thread->flags, ~flag);
+    atomic_and_acq_rel(&thread->flags, ~flag);
 }
 
 static inline int
