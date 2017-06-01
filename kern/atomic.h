@@ -116,6 +116,11 @@ MACRO_END
  * Common shortcuts.
  */
 
+#define atomic_load_acquire(ptr)   atomic_load(ptr, ATOMIC_ACQUIRE)
+
+#define atomic_store_release(ptr, val)   \
+    atomic_store(ptr, val, ATOMIC_RELEASE)
+
 #define atomic_cas_acquire(ptr, oval, nval) \
     atomic_cas(ptr, oval, nval, ATOMIC_ACQUIRE)
 

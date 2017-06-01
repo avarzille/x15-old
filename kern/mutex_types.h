@@ -35,8 +35,10 @@ struct mutex {
 
 #else /* X15_MUTEX_PI */
 
+#include <stdint.h>
+
 struct mutex {
-    unsigned int state;
+    uintptr_t owner;
 };
 
 #endif /* X15_MUTEX_PI */

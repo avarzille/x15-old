@@ -724,4 +724,6 @@ thread_get_specific(unsigned int key)
     return thread_tsd_get(thread_self(), key);
 }
 
+bool thread_is_running(struct thread *thread);
+
 #endif /* _KERN_THREAD_H */

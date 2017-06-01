@@ -69,6 +69,7 @@ mutex_unlock(struct mutex *mutex)
 #else /* X15_MUTEX_PI */
 
 #include <kern/assert.h>
+
 #include <kern/error.h>
 #include <kern/macros.h>
 #include <kern/mutex_i.h>
@@ -76,7 +77,7 @@ mutex_unlock(struct mutex *mutex)
 
 struct mutex;
 
-#define mutex_assert_locked(mutex) assert((mutex)->state != MUTEX_UNLOCKED)
+#define mutex_assert_locked(mutex) assert((mutex)->owner != 0)
 
 /*
  * Initialize a mutex.
@@ -84,7 +85,7 @@ struct mutex;
 static inline void
 mutex_init(struct mutex *mutex)
 {
-    mutex->state = MUTEX_UNLOCKED;
+    mutex->owner = 0;
 }
 
 /*
@@ -97,12 +98,11 @@ mutex_init(struct mutex *mutex)
 static inline int
 mutex_trylock(struct mutex *mutex)
 {
-    unsigned int state;
+    uintptr_t owner;
 
-    state = mutex_lock_fast(mutex);
+    owner = mutex_lock_fast(mutex);
 
-    if (unlikely(state != MUTEX_UNLOCKED)) {
-        assert((state == MUTEX_LOCKED) || (state == MUTEX_CONTENDED));
+    if (unlikely(owner != 0)) {
         return ERROR_BUSY;
     }
 
@@ -120,12 +120,10 @@ mutex_trylock(struct mutex *mutex)
 static inline void
 mutex_lock(struct mutex *mutex)
 {
-    unsigned int state;
+    uintptr_t owner;
 
-    state = mutex_lock_fast(mutex);
-
-    if (unlikely(state != MUTEX_UNLOCKED)) {
-        assert((state == MUTEX_LOCKED) || (state == MUTEX_CONTENDED));
+    owner = mutex_lock_fast(mutex);
+    if (unlikely(owner != 0)) {
         mutex_lock_slow(mutex);
     }
 }
@@ -139,12 +137,10 @@ mutex_lock(struct mutex *mutex)
 static inline void
 mutex_unlock(struct mutex *mutex)
 {
-    unsigned int state;
+    uintptr_t owner;
 
-    state = mutex_unlock_fast(mutex);
-
-    if (unlikely(state != MUTEX_LOCKED)) {
-        assert(state == MUTEX_CONTENDED);
+    owner = mutex_unlock_fast(mutex);
+    if (unlikely(owner & MUTEX_WAITERS)) {
         mutex_unlock_slow(mutex);
     }
 

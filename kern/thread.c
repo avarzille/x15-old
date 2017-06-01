@@ -2736,3 +2736,12 @@ thread_key_create(unsigned int *keyp, thread_dtor_fn_t dtor)
     thread_dtors[key] = dtor;
     *keyp = key;
 }
+
+bool
+thread_is_running(struct thread *thread)
+{
+    struct thread_runq *runq;
+
+    runq = thread->runq;
+    return runq != NULL && runq->current == thread;
+}

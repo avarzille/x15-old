@@ -21,27 +21,24 @@
 #ifndef X15_MUTEX_PI
 
 #include <kern/assert.h>
+
 #include <kern/atomic.h>
 #include <kern/mutex_types.h>
+#include <kern/thread.h>
 
-#define MUTEX_UNLOCKED  0
-#define MUTEX_LOCKED    1
-#define MUTEX_CONTENDED 2
+#define MUTEX_WAITERS   1
+#define MUTEX_LOCKED    2
 
-static inline unsigned int
+static inline uintptr_t
 mutex_lock_fast(struct mutex *mutex)
 {
-    return atomic_cas_acquire(&mutex->state, MUTEX_UNLOCKED, MUTEX_LOCKED);
+    return atomic_cas_acquire(&mutex->owner, 0, (uintptr_t)thread_self());
 }
 
-static inline unsigned int
+static inline uintptr_t
 mutex_unlock_fast(struct mutex *mutex)
 {
-    unsigned int state;
-
-    state = atomic_swap_release(&mutex->state, MUTEX_UNLOCKED);
-    assert((state == MUTEX_LOCKED) || (state == MUTEX_CONTENDED));
-    return state;
+    return atomic_cas_release(&mutex->owner, (uintptr_t)thread_self(), 0);
 }
 
 void mutex_lock_slow(struct mutex *mutex);
