@@ -25,24 +25,16 @@
 #include <kern/mutex_i.h>
 #include <kern/sleepq.h>
 
-#define MUTEX_FLAGS_ALL   (MUTEX_WAITERS | MUTEX_LOCKED)
+#define MUTEX_FLAGS_ALL   (MUTEX_WAITERS | MUTEX_INTLOCK)
 
 static struct thread *
 mutex_owner_thread(uintptr_t owner)
 {
     return (struct thread *)(owner & ~MUTEX_FLAGS_ALL);
 }
- 
-/* Modifies the owner word of a mutex so that:
- * - If it's zero: Set ourselves as the new owner.
- * - If it's nonzero:
- *   - If the waiters bit is set, return.
- *   - Otherwise, try to atomically set the lock and waiters bit. If we
- *     succeed, add a reference to the owner thread, and clear the lock bit.
- */
 
 static uintptr_t
-mutex_owner_update(struct mutex *mutex, uintptr_t self)
+mutex_owner_update(struct mutex *mutex, uintptr_t self, uintptr_t ilb)
 {
     uintptr_t owner, new_owner;
 
@@ -51,16 +43,14 @@ mutex_owner_update(struct mutex *mutex, uintptr_t self)
 
         if (owner & MUTEX_WAITERS) {
             return owner;
-        } else if (owner & MUTEX_LOCKED) {
-            cpu_pause();
-            continue;
         }
 
-        new_owner = owner == 0 ? self : owner | MUTEX_FLAGS_ALL;
+        new_owner = owner == 0 ? self : (owner | MUTEX_WAITERS | ilb);
         if (atomic_cas_acquire(&mutex->owner, owner, new_owner) == owner) {
-            if (owner != 0) {
+            if (owner != 0 && ilb != 0) {
                 thread_ref((struct thread *)owner);
-                atomic_store_release(&mutex->owner, new_owner & ~MUTEX_LOCKED);
+                atomic_store_release(&mutex->owner,
+                                     new_owner & ~MUTEX_INTLOCK);
             }
 
             return owner;
@@ -73,9 +63,50 @@ mutex_owner_eq(struct mutex *mutex, uintptr_t owner)
 {
     uintptr_t prev;
 
-    prev = atomic_load(&mutex->owner, ATOMIC_RELAXED);
-    owner |= prev & MUTEX_WAITERS;
-    return owner == (prev & ~MUTEX_LOCKED);
+    prev = atomic_load(&mutex->owner, ATOMIC_RELAXED) & ~MUTEX_FLAGS_ALL;
+    return prev == (owner & ~MUTEX_FLAGS_ALL);
+}
+
+static bool
+mutex_try_spin(struct mutex *mutex, uintptr_t self, uintptr_t *prevp)
+{
+    uintptr_t owner, tmp;
+    bool ret;
+
+    owner = mutex_owner_update(mutex, self, MUTEX_INTLOCK);
+    ret = true;
+
+    if (owner == 0) {
+        return ret;
+    }
+
+    thread_preempt_disable();
+
+    for (;;) {
+        if (mutex_owner_eq(mutex, owner)) {
+            if (!thread_is_running(mutex_owner_thread(owner))) {
+                *prevp = owner;
+                ret = false;
+                break;
+            }
+
+            continue;
+        }
+
+        tmp = mutex_owner_update(mutex, self, MUTEX_INTLOCK);
+
+        if ((owner & MUTEX_WAITERS) == 0) {
+            thread_unref(mutex_owner_thread(owner));
+        }
+
+        owner = tmp;
+        if (owner == 0) {
+            break;
+        }
+    }
+
+    thread_preempt_enable();
+    return ret;
 }
 
 void
@@ -86,58 +117,33 @@ mutex_lock_slow(struct mutex *mutex)
     uintptr_t owner, self, tmp;
 
     self = (uintptr_t)thread_self();
-    owner = mutex_owner_update(mutex, self);
 
-    if (owner == 0) {
+    if (mutex_try_spin(mutex, self, &owner)) {
+        return;
+    }
+
+    sleepq = sleepq_lend(mutex, false, &flags);
+    tmp = mutex_owner_update(mutex, self, 0);
+
+    if ((owner & MUTEX_WAITERS) == 0) {
+        thread_ref((struct thread *)owner);
+    }
+
+    if (tmp == 0) {
+        sleepq_return(sleepq, flags);
         return;
     }
 
     for (;;) {
-        /* If the owner matches our expectation and it's running, spin */
-        if (mutex_owner_eq(mutex, owner)) {
-            if (thread_is_running(mutex_owner_thread(owner))) {
-                continue;
-            }
-
+        if (mutex_owner_update(mutex, self, 0) == 0) {
             break;
         }
 
-        /* Delay the call to 'thread_unref', since it can be a
-         * potentially expensive operation, and it puts that waiter
-         * at a disadvantage. */
-
-        tmp = mutex_owner_update(mutex, self);
-
-        if ((owner & MUTEX_WAITERS) == 0) {
-            /* remove the reference that we added. */
-            thread_unref(mutex_owner_thread(owner));
-        }
-
-        owner = tmp;
-        if (owner == 0) {
-            return;
-        }
+        sleepq_wait(sleepq, "mutex");
     }
 
-    /* Spinning didn't work - sleep */
-    sleepq = sleepq_lend(mutex, false, &flags);
-
-    for (;;) {
-        if (mutex_owner_eq(mutex, owner)) {
-            sleepq_wait(sleepq, "mutex");
-            continue;
-        }
-
-        tmp = mutex_owner_update(mutex, self);
-
-        if ((owner & MUTEX_WAITERS) == 0) {
-            thread_unref(mutex_owner_thread(owner));
-        }
-
-        owner = tmp;
-        if (owner == 0) {
-            break;
-        }
+    if (sleepq_empty(sleepq)) {
+        atomic_store_release(&mutex->owner, self & ~MUTEX_WAITERS);
     }
 
     sleepq_return(sleepq, flags);
@@ -151,7 +157,7 @@ mutex_unlock_slow(struct mutex *mutex)
     uintptr_t owner;
     
     for (;;) {
-        owner = atomic_load_acquire(&mutex->owner) & ~MUTEX_LOCKED;
+        owner = atomic_load_acquire(&mutex->owner) & ~MUTEX_INTLOCK;
         if (atomic_cas_release(&mutex->owner, owner, 0) != owner) {
             cpu_pause();
             continue;

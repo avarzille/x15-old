@@ -26,8 +26,8 @@
 #include <kern/mutex_types.h>
 #include <kern/thread.h>
 
-#define MUTEX_WAITERS   1
-#define MUTEX_LOCKED    2
+#define MUTEX_WAITERS    1
+#define MUTEX_INTLOCK    2
 
 static inline uintptr_t
 mutex_lock_fast(struct mutex *mutex)

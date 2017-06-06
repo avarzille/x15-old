@@ -2743,5 +2743,6 @@ thread_is_running(struct thread *thread)
     struct thread_runq *runq;
 
     runq = thread->runq;
-    return runq != NULL && runq->current == thread;
+    return runq != NULL &&
+      atomic_load(&runq->current, ATOMIC_RELAXED) == thread;
 }
