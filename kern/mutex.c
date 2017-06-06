@@ -126,7 +126,7 @@ mutex_lock_slow(struct mutex *mutex)
     tmp = mutex_owner_update(mutex, self, 0);
 
     if ((owner & MUTEX_WAITERS) == 0) {
-        thread_ref((struct thread *)owner);
+        thread_unref((struct thread *)owner);
     }
 
     if (tmp == 0) {
