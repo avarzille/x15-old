@@ -25,16 +25,23 @@
 #include <kern/mutex_i.h>
 #include <kern/sleepq.h>
 
+#include <machine/cpu.h>
+
 static struct thread *
 mutex_owner_thread(uintptr_t owner)
 {
     return (struct thread *)(owner & ~MUTEX_WAITERS);
 }
 
+/* Atomically modify the mutex's owner, so that:
+ * - If it's unowned: Set ourselves as the owner.
+ * - Otherwise: Set the contended bit if it hasn't.
+ * Returns the owner value previous to the call. */
+
 static uintptr_t
-mutex_owner_update(struct mutex *mutex, uintptr_t self)
+mutex_update_owner(struct mutex *mutex, uintptr_t self)
 {
-    uintptr_t owner, new_owner;
+    uintptr_t owner, new_owner, ret;
 
     for (;;) {
         owner = atomic_load(&mutex->owner, ATOMIC_RELAXED);
@@ -45,7 +52,8 @@ mutex_owner_update(struct mutex *mutex, uintptr_t self)
         new_owner = owner <= MUTEX_FORCE_WAIT ?
           self : (owner | MUTEX_WAITERS);
 
-        if (atomic_cas_acquire(&mutex->owner, owner, new_owner) == owner) {
+        ret = atomic_cas_acquire(&mutex->owner, owner, new_owner);
+        if (ret == owner) {
             return owner;
         }
 
@@ -70,7 +78,7 @@ void mutex_lock_slow(struct mutex *mutex)
 
     self = (uintptr_t)thread_self();
     sleepq = sleepq_lend(mutex, false, &flags);
-    owner = mutex_owner_update(mutex, self);
+    owner = mutex_update_owner(mutex, self);
 
     if (owner <= MUTEX_FORCE_WAIT) {
         goto done;
@@ -85,7 +93,7 @@ void mutex_lock_slow(struct mutex *mutex)
             continue;
         }
 
-        owner = mutex_owner_update(mutex, self | MUTEX_WAITERS);
+        owner = mutex_update_owner(mutex, self | MUTEX_WAITERS);
         if (owner <= MUTEX_FORCE_WAIT) {
             break;
         }
@@ -104,13 +112,25 @@ mutex_unlock_slow(struct mutex *mutex)
 {
     struct sleepq *sleepq;
     unsigned long flags;
+    int error;
 
     atomic_store_release(&mutex->owner, MUTEX_FORCE_WAIT);
-    sleepq = sleepq_acquire(mutex, false, &flags);
 
-    if (sleepq != NULL) {
-        sleepq_signal(sleepq);
-        sleepq_release(sleepq, flags);
+    for (;;) {
+        if (atomic_load(&mutex->owner, ATOMIC_RELAXED) != MUTEX_FORCE_WAIT) {
+            break;
+        }
+
+        error = sleepq_tryacquire(mutex, false, &flags, &sleepq);
+
+        if (error != 0) {
+            continue;
+        } else if (sleepq != NULL) {
+            sleepq_signal(sleepq);
+            sleepq_release(sleepq, flags);
+        }
+
+        break;
     }
 }
 

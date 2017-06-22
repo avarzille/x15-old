@@ -71,6 +71,8 @@ void sleepq_destroy(struct sleepq *sleepq);
  */
 struct sleepq * sleepq_acquire(const void *sync_obj, bool condition,
                                unsigned long *flags);
+int sleepq_tryacquire(const void *sync_obj, bool condition,
+                      unsigned long *flags, struct sleepq **sleepqp);
 void sleepq_release(struct sleepq *sleepq, unsigned long flags);
 
 /*
