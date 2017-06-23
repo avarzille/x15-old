@@ -33,10 +33,12 @@ mutex_owner_thread(uintptr_t owner)
     return (struct thread *)(owner & ~MUTEX_WAITERS);
 }
 
-/* Atomically modify the mutex's owner, so that:
+/*
+ * Atomically modify the mutex's owner, so that:
  * - If it's unowned: Set ourselves as the owner.
- * - Otherwise: Set the contended bit if it hasn't.
- * Returns the owner value previous to the call. */
+ * - Otherwise: Set the contended bit if it's not.
+ * Returns the owner value previous to the call.
+ */
 
 static uintptr_t
 mutex_update_owner(struct mutex *mutex, uintptr_t self)
@@ -45,6 +47,7 @@ mutex_update_owner(struct mutex *mutex, uintptr_t self)
 
     for (;;) {
         owner = atomic_load(&mutex->owner, ATOMIC_RELAXED);
+
         if (owner & MUTEX_WAITERS) {
             return owner;
         }
@@ -53,6 +56,7 @@ mutex_update_owner(struct mutex *mutex, uintptr_t self)
           self : (owner | MUTEX_WAITERS);
 
         ret = atomic_cas_acquire(&mutex->owner, owner, new_owner);
+
         if (ret == owner) {
             return owner;
         }
@@ -94,6 +98,7 @@ void mutex_lock_slow(struct mutex *mutex)
         }
 
         owner = mutex_update_owner(mutex, self | MUTEX_WAITERS);
+
         if (owner <= MUTEX_FORCE_WAIT) {
             break;
         }
@@ -112,25 +117,24 @@ mutex_unlock_slow(struct mutex *mutex)
 {
     struct sleepq *sleepq;
     unsigned long flags;
-    int error;
+    uintptr_t owner;
 
     atomic_store_release(&mutex->owner, MUTEX_FORCE_WAIT);
 
     for (;;) {
-        if (atomic_load(&mutex->owner, ATOMIC_RELAXED) != MUTEX_FORCE_WAIT) {
+        owner = atomic_load(&mutex->owner, ATOMIC_RELAXED);
+
+        if (owner != MUTEX_FORCE_WAIT) {
             break;
         }
 
-        error = sleepq_tryacquire(mutex, false, &flags, &sleepq);
+        sleepq = sleepq_tryacquire(mutex, false, &flags);
 
-        if (error != 0) {
-            continue;
-        } else if (sleepq != NULL) {
+        if (sleepq != NULL) {
             sleepq_signal(sleepq);
             sleepq_release(sleepq, flags);
+            break;
         }
-
-        break;
     }
 }
 

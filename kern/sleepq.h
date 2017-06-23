@@ -68,11 +68,16 @@ void sleepq_destroy(struct sleepq *sleepq);
  *
  * The condition argument must be true if the synchronization object
  * is a condition variable.
+ *
+ * Note that, in the case of 'sleepq_tryacquire', the call may
+ * return NULL either because the sleepq has been acquired, or
+ * because some of its internal state is shared. It's the responsibility
+ * of the caller to distinguish those cases.
  */
 struct sleepq * sleepq_acquire(const void *sync_obj, bool condition,
                                unsigned long *flags);
-int sleepq_tryacquire(const void *sync_obj, bool condition,
-                      unsigned long *flags, struct sleepq **sleepqp);
+struct sleepq * sleepq_tryacquire(const void *sync_obj, bool condition,
+                                  unsigned long *flags);
 void sleepq_release(struct sleepq *sleepq, unsigned long flags);
 
 /*

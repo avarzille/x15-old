@@ -257,11 +257,11 @@ sleepq_acquire(const void *sync_obj, bool condition, unsigned long *flags)
     return sleepq;
 }
 
-int
-sleepq_tryacquire(const void *sync_obj, bool condition,
-                  unsigned long *flags, struct sleepq **sleepqp)
+struct sleepq *
+sleepq_tryacquire(const void *sync_obj, bool condition, unsigned long *flags)
 {
     struct sleepq_bucket *bucket;
+    struct sleepq *sleepq;
     int error;
 
     assert(sync_obj != NULL);
@@ -270,16 +270,17 @@ sleepq_tryacquire(const void *sync_obj, bool condition,
 
     error = spinlock_trylock_intr_save(&bucket->lock, flags);
 
-    if (error != 0) {
-        return error;
+    if (error) {
+        return NULL;
     }
 
-    *sleepqp = sleepq_bucket_lookup(bucket, sync_obj);
-    if (*sleepqp == NULL) {
+    sleepq = sleepq_bucket_lookup(bucket, sync_obj);
+
+    if (sleepq == NULL) {
         spinlock_unlock_intr_restore(&bucket->lock, *flags);
     }
 
-    return error;
+    return sleepq;
 }
 
 void
