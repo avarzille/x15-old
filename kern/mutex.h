@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2013-2017 Richard Braun.
+ * Copyright (c) 2017 Agustina Arzille.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,7 +20,6 @@
  *
  * Unlike spin locks, acquiring a mutex may make the calling thread sleep.
  *
- * TODO Adaptive spinning.
  */
 
 #ifndef _KERN_MUTEX_H
@@ -29,55 +29,23 @@
 
 #ifdef X15_MUTEX_PI
 
-#include <kern/rtmutex.h>
+#ifdef X15_MUTEX_ADAPTIVE
+#error "only one of X15_MUTEX_PI and X15_MUTEX_ADAPTIVE may be defined"
+#endif /* X15_MUTEX_ADAPTIVE */
 
-struct mutex;
+#include <kern/mutex/mutex_rt_i.h>
 
-#define mutex_assert_locked(mutex) rtmutex_assert_locked(&(mutex)->rtmutex)
+#elif defined(X15_MUTEX_ADAPTIVE)
 
-static inline void
-mutex_init(struct mutex *mutex)
-{
-    rtmutex_init(&mutex->rtmutex);
-}
+#include <kern/mutex/mutex_adaptive_i.h>
 
-static inline int
-mutex_trylock(struct mutex *mutex)
-{
-    return rtmutex_trylock(&mutex->rtmutex);
-}
+#else
 
-static inline void
-mutex_lock(struct mutex *mutex)
-{
-    rtmutex_lock(&mutex->rtmutex);
-}
+#include <kern/mutex/mutex_plain_i.h>
 
-static inline void
-mutex_unlock(struct mutex *mutex)
-{
-    rtmutex_unlock(&mutex->rtmutex);
+#endif /* X15_MUTEX_PI */
 
-    /*
-     * If this mutex was used along with a condition variable, wake up
-     * a potential pending waiter. This must be done after the mutex is
-     * unlocked so that a higher priority thread can directly acquire it.
-     */
-    thread_wakeup_last_cond();
-}
-
-#else /* X15_MUTEX_PI */
-
-#include <kern/assert.h>
-
-#include <kern/error.h>
-#include <kern/macros.h>
-#include <kern/mutex_i.h>
 #include <kern/thread.h>
-
-struct mutex;
-
-#define mutex_assert_locked(mutex) assert((mutex)->owner != 0)
 
 /*
  * Initialize a mutex.
@@ -85,8 +53,10 @@ struct mutex;
 static inline void
 mutex_init(struct mutex *mutex)
 {
-    mutex->owner = 0;
+    mutex_impl_init(mutex);
 }
+
+#define mutex_assert_locked(mutex)   mutex_assert_locked_impl(mutex)
 
 /*
  * Attempt to lock the given mutex.
@@ -98,15 +68,7 @@ mutex_init(struct mutex *mutex)
 static inline int
 mutex_trylock(struct mutex *mutex)
 {
-    uintptr_t owner;
-
-    owner = mutex_lock_fast(mutex);
-
-    if (unlikely(owner != 0)) {
-        return ERROR_BUSY;
-    }
-
-    return 0;
+    return mutex_lock_fast(mutex);
 }
 
 /*
@@ -120,10 +82,11 @@ mutex_trylock(struct mutex *mutex)
 static inline void
 mutex_lock(struct mutex *mutex)
 {
-    uintptr_t owner;
+    int error;
 
-    owner = mutex_lock_fast(mutex);
-    if (unlikely(owner != 0)) {
+    error = mutex_lock_fast(mutex);
+
+    if (error) {
         mutex_lock_slow(mutex);
     }
 }
@@ -137,10 +100,11 @@ mutex_lock(struct mutex *mutex)
 static inline void
 mutex_unlock(struct mutex *mutex)
 {
-    uintptr_t owner;
+    int error;
 
-    owner = mutex_unlock_fast(mutex);
-    if (unlikely(owner & MUTEX_WAITERS)) {
+    error = mutex_unlock_fast(mutex);
+
+    if (error) {
         mutex_unlock_slow(mutex);
     }
 
@@ -150,7 +114,5 @@ mutex_unlock(struct mutex *mutex)
      */
     thread_wakeup_last_cond();
 }
-
-#endif /* X15_MUTEX_PI */
 
 #endif /* _KERN_MUTEX_H */

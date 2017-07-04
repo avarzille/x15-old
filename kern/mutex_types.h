@@ -33,12 +33,18 @@ struct mutex {
     struct rtmutex rtmutex;
 };
 
-#else /* X15_MUTEX_PI */
+#elif defined(X15_MUTEX_ADAPTIVE)
 
 #include <stdint.h>
 
 struct mutex {
     uintptr_t owner;
+};
+
+#else /* X15_MUTEX_PI */
+
+struct mutex {
+    unsigned int state;
 };
 
 #endif /* X15_MUTEX_PI */

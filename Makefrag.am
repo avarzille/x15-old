@@ -46,8 +46,10 @@ x15_SOURCES +=                                              \
         kern/macros.h                                       \
         kern/mutex.c                                        \
         kern/mutex.h                                        \
-        kern/mutex_i.h                                      \
         kern/mutex_types.h                                  \
+        kern/mutex/mutex_adaptive_i.h                       \
+        kern/mutex/mutex_plain_i.h                          \
+        kern/mutex/mutex_rt_i.h                             \
         kern/panic.c                                        \
         kern/panic.h                                        \
         kern/param.h                                        \

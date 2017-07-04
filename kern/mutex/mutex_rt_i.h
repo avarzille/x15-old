@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2013-2017 Richard Braun.
+ * Copyright (c) 2017 Richard Braun.
+ * Copyright (c) 2017 Agustina Arzille.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,36 +16,57 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef _KERN_MUTEX_I_H
-#define _KERN_MUTEX_I_H
+#ifndef _KERN_MUTEX_RT_I_H
+#define _KERN_MUTEX_RT_I_H
 
-#ifndef X15_MUTEX_PI
+#include <kern/rtmutex.h>
 
-#include <kern/assert.h>
-
-#include <kern/atomic.h>
-#include <kern/mutex_types.h>
-#include <kern/thread.h>
-
-#define MUTEX_WAITERS       1
-#define MUTEX_FORCE_WAIT    2
-
-static inline uintptr_t
-mutex_lock_fast(struct mutex *mutex)
+static inline void
+mutex_impl_init(struct mutex *mutex)
 {
-    return atomic_cas_acquire(&mutex->owner, 0, (uintptr_t)thread_self());
+    rtmutex_init(&mutex->rtmutex);
 }
 
-static inline uintptr_t
+#define mutex_assert_locked_impl(mutex) \
+  rtmutex_assert_locked(&(mutex)->rtmutex)
+
+static inline int
+mutex_lock_fast(struct mutex *mutex)
+{
+    return rtmutex_trylock(&mutex->rtmutex);
+}
+
+static inline int
 mutex_unlock_fast(struct mutex *mutex)
 {
-    return atomic_cas_release(&mutex->owner, (uintptr_t)thread_self(), 0);
+    uintptr_t prev;
+
+    prev = rtmutex_unlock_fast(&mutex->rtmutex);
+
+    if (prev != 0) {
+        return ERROR_BUSY;
+    }
+
+    return 0;
 }
 
 void mutex_lock_slow(struct mutex *mutex);
-
 void mutex_unlock_slow(struct mutex *mutex);
 
-#endif /* X15_MUTEX_PI */
+#ifdef X15_MUTEX_IMPL
 
-#endif /* _KERN_MUTEX_I_H */
+void
+mutex_lock_slow(struct mutex *mutex)
+{
+    rtmutex_lock_slow(&mutex->rtmutex);
+}
+
+void
+mutex_unlock_slow(struct mutex *mutex)
+{
+    rtmutex_unlock_slow(&mutex->rtmutex);
+}
+
+#endif /* X15_MUTEX_IMPL */
+
+#endif /* _KERN_MUTEX_RT_I_H */

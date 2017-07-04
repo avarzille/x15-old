@@ -53,6 +53,10 @@ AC_ARG_ENABLE([mutex-pi],
                                (note that priority inheritance is always
                                 enabled for real-time mutexes)])])
 
+AC_ARG_ENABLE([mutex-adaptive],
+              [AS_HELP_STRING([--enable-mutex-adaptive],
+                              [enable adaptive mutexes])])
+
 AC_ARG_ENABLE([thread-stack-guard],
               [AS_HELP_STRING([--enable-thread-stack-guard],
                               [enable kernel thread stack guard pages])])
@@ -103,6 +107,10 @@ AC_MSG_NOTICE([maximum number of supported processors: $opt_max_cpus])
 AS_IF([test x"$enable_mutex_pi" = xyes],
       [AC_DEFINE_UNQUOTED([X15_MUTEX_PI], [],
                           [Enable priority inheritance for regular mutexes])])
+
+AS_IF([test x"$enable_mutex_adaptive" = xyes],
+      [AC_DEFINE_UNQUOTED([X15_MUTEX_ADAPTIVE], [],
+                          [Enable adaptive mutexes])])
 
 AS_IF([test x"$enable_thread_stack_guard" = xyes],
       [AC_DEFINE_UNQUOTED([X15_THREAD_STACK_GUARD], [],
