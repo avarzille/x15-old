@@ -27,6 +27,7 @@
  */
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include <kern/condition.h>
 #include <kern/error.h>
@@ -34,7 +35,6 @@
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/sprintf.h>
 #include <kern/sref.h>
 #include <kern/syscnt.h>
 #include <kern/thread.h>
@@ -67,7 +67,7 @@ test_inc(void *arg)
             mutex_unlock(&test_lock);
         }
 
-        printk("counter global value: %lu\n", test_counter.value);
+        printf("counter global value: %lu\n", test_counter.value);
         syscnt_info("sref_epoch");
         syscnt_info("sref_dirty_zero");
         syscnt_info("sref_true_zero");

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 Richard Braun.
+ * Copyright (c) 2014-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,22 +15,23 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
+#include <stdalign.h>
 #include <stddef.h>
 
-#include <kern/assert.h>
+#include <kern/atomic.h>
+#include <kern/init.h>
 #include <kern/macros.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
 #include <kern/spinlock.h>
 #include <kern/thread.h>
 #include <kern/xcall.h>
-#include <machine/mb.h>
 #include <machine/cpu.h>
 
 struct xcall {
-    xcall_fn_t fn;
+    alignas(CPU_L1_SIZE) xcall_fn_t fn;
     void *arg;
-} __aligned(CPU_L1_SIZE);
+};
 
 /*
  * Per-CPU data.
@@ -49,11 +50,11 @@ struct xcall {
  * between multiple cross-calls.
  */
 struct xcall_cpu_data {
-    struct xcall send_calls[X15_MAX_CPUS];
+    alignas(CPU_L1_SIZE) struct xcall send_calls[X15_MAX_CPUS];
 
     struct xcall *recv_call;
     struct spinlock lock;
-} __aligned(CPU_L1_SIZE);
+};
 
 static struct xcall_cpu_data xcall_cpu_data __percpu;
 
@@ -86,18 +87,25 @@ xcall_cpu_data_get_send_call(struct xcall_cpu_data *cpu_data, unsigned int cpu)
 }
 
 static struct xcall *
-xcall_cpu_data_get_recv_call(struct xcall_cpu_data *cpu_data)
+xcall_cpu_data_get_recv_call(const struct xcall_cpu_data *cpu_data)
 {
-    return cpu_data->recv_call;
+    return atomic_load(&cpu_data->recv_call, ATOMIC_ACQUIRE);
+}
+
+static void
+xcall_cpu_data_set_recv_call(struct xcall_cpu_data *cpu_data,
+                             struct xcall *call)
+{
+    atomic_store(&cpu_data->recv_call, call, ATOMIC_RELEASE);
 }
 
 static void
 xcall_cpu_data_clear_recv_call(struct xcall_cpu_data *cpu_data)
 {
-    cpu_data->recv_call = NULL;
+    xcall_cpu_data_set_recv_call(cpu_data, NULL);
 }
 
-void
+static int __init
 xcall_setup(void)
 {
     unsigned int i;
@@ -105,7 +113,13 @@ xcall_setup(void)
     for (i = 0; i < cpu_count(); i++) {
         xcall_cpu_data_init(percpu_ptr(xcall_cpu_data, i));
     }
+
+    return 0;
 }
+
+INIT_OP_DEFINE(xcall_setup,
+               INIT_OP_DEP(thread_bootstrap, true),
+               INIT_OP_DEP(spinlock_setup, true));
 
 void
 xcall_call(xcall_fn_t fn, void *arg, unsigned int cpu)
@@ -113,20 +127,12 @@ xcall_call(xcall_fn_t fn, void *arg, unsigned int cpu)
     struct xcall_cpu_data *local_data, *remote_data;
     struct xcall *call;
 
+    assert(cpu_intr_enabled());
     assert(fn != NULL);
 
     remote_data = percpu_ptr(xcall_cpu_data, cpu);
 
     thread_preempt_disable();
-
-    if (cpu == cpu_id()) {
-        unsigned long flags;
-
-        cpu_intr_save(&flags);
-        fn(arg);
-        cpu_intr_restore(flags);
-        goto out;
-    }
 
     local_data = xcall_cpu_data_get();
     call = xcall_cpu_data_get_send_call(local_data, cpu);
@@ -134,23 +140,16 @@ xcall_call(xcall_fn_t fn, void *arg, unsigned int cpu)
 
     spinlock_lock(&remote_data->lock);
 
-    remote_data->recv_call = call;
-
-    /* This barrier pairs with the one implied by the received IPI */
-    mb_store();
+    xcall_cpu_data_set_recv_call(remote_data, call);
 
     cpu_send_xcall(cpu);
 
-    while (remote_data->recv_call != NULL) {
+    while (xcall_cpu_data_get_recv_call(remote_data) != NULL) {
         cpu_pause();
     }
 
     spinlock_unlock(&remote_data->lock);
 
-    /* This barrier pairs with the one in the interrupt handler */
-    mb_load();
-
-out:
     thread_preempt_enable();
 }
 
@@ -160,11 +159,10 @@ xcall_intr(void)
     struct xcall_cpu_data *cpu_data;
     struct xcall *call;
 
-    thread_assert_interrupted();
+    assert(thread_check_intr_context());
 
     cpu_data = xcall_cpu_data_get();
     call = xcall_cpu_data_get_recv_call(cpu_data);
     call->fn(call->arg);
-    mb_store();
     xcall_cpu_data_clear_recv_call(cpu_data);
 }

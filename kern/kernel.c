@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 Richard Braun.
+ * Copyright (c) 2011-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,41 +15,20 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <kern/cpumap.h>
 #include <kern/init.h>
 #include <kern/kernel.h>
-#include <kern/llsync.h>
-#include <kern/percpu.h>
-#include <kern/sleepq.h>
-#include <kern/sref.h>
-#include <kern/task.h>
 #include <kern/thread.h>
-#include <kern/turnstile.h>
-#include <kern/work.h>
-#include <kern/xcall.h>
 #include <machine/cpu.h>
-#include <vm/vm_page.h>
-
-#ifdef X15_RUN_TEST_MODULE
 #include <test/test.h>
-#endif /* X15_RUN_TEST_MODULE */
+#include <vm/vm_page.h>
 
 void __init
 kernel_main(void)
 {
     assert(!cpu_intr_enabled());
 
-    percpu_cleanup();
-    cpumap_setup();
-    xcall_setup();
-    task_setup();
-    sleepq_setup();
-    turnstile_setup();
-    thread_setup();
-    work_setup();
-    llsync_setup();
-    sref_setup();
-    vm_page_info();
+    init_setup();
+    vm_page_log_info();
 
 #ifdef X15_RUN_TEST_MODULE
     test_setup();

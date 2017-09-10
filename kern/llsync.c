@@ -32,25 +32,24 @@
  * TODO Gracefully handle large amounts of deferred works.
  */
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 
-#include <kern/assert.h>
 #include <kern/condition.h>
 #include <kern/cpumap.h>
 #include <kern/init.h>
 #include <kern/list.h>
+#include <kern/log.h>
 #include <kern/llsync.h>
 #include <kern/llsync_i.h>
 #include <kern/macros.h>
 #include <kern/mutex.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
-#include <kern/printk.h>
 #include <kern/spinlock.h>
-#include <kern/sprintf.h>
 #include <kern/syscnt.h>
 #include <kern/work.h>
+#include <kern/thread.h>
 #include <machine/cpu.h>
 
 /*
@@ -83,7 +82,7 @@ llsync_ready(void)
     return llsync_is_ready;
 }
 
-void __init
+static int __init
 llsync_setup(void)
 {
     struct llsync_cpu_data *cpu_data;
@@ -105,8 +104,16 @@ llsync_setup(void)
         work_queue_init(&cpu_data->queue0);
     }
 
-    llsync_is_ready = true;
+    return 0;
 }
+
+INIT_OP_DEFINE(llsync_setup,
+               INIT_OP_DEP(log_setup, true),
+               INIT_OP_DEP(mutex_setup, true),
+               INIT_OP_DEP(spinlock_setup, true),
+               INIT_OP_DEP(syscnt_setup, true),
+               INIT_OP_DEP(thread_bootstrap, true),
+               INIT_OP_DEP(work_setup, true));
 
 static void
 llsync_process_global_checkpoint(void)
@@ -123,7 +130,7 @@ llsync_process_global_checkpoint(void)
     /* TODO Handle hysteresis */
     if (!llsync_data.no_warning && (nr_works >= LLSYNC_NR_PENDING_WORKS_WARN)) {
         llsync_data.no_warning = 1;
-        printk("llsync: warning: large number of pending works\n");
+        log_warning("llsync: large number of pending works\n");
     }
 
     if (llsync_data.nr_registered_cpus == 0) {
@@ -182,6 +189,10 @@ llsync_register(void)
     struct llsync_cpu_data *cpu_data;
     unsigned long flags;
     unsigned int cpu;
+
+    if (!llsync_is_ready) {
+        llsync_is_ready = true;
+    }
 
     cpu = cpu_id();
     cpu_data = llsync_get_cpu_data();
@@ -244,8 +255,7 @@ llsync_report_periodic_event(void)
     struct llsync_cpu_data *cpu_data;
     unsigned int gcid;
 
-    assert(!cpu_intr_enabled());
-    assert(!thread_preempt_enabled());
+    assert(thread_check_intr_context());
 
     cpu_data = llsync_get_cpu_data();
 
@@ -290,12 +300,10 @@ llsync_defer(struct work *work)
     struct llsync_cpu_data *cpu_data;
     unsigned long flags;
 
-    thread_preempt_disable();
-    cpu_intr_save(&flags);
+    thread_preempt_disable_intr_save(&flags);
     cpu_data = llsync_get_cpu_data();
     work_queue_push(&cpu_data->queue0, work);
-    cpu_intr_restore(flags);
-    thread_preempt_enable();
+    thread_preempt_enable_intr_restore(flags);
 }
 
 static void

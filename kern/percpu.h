@@ -42,7 +42,7 @@
  *
  * Architecture-specific code must enforce that the percpu section starts
  * at 0, thereby making the addresses of percpu variables offsets into the
- * percpu area. It must also make sure the _percpu and _epercpu symbols
+ * percpu area. It must also make sure the _percpu and _percpu_end symbols
  * have valid virtual addresses, included between _init (but not part of
  * the init section) and _end.
  *
@@ -53,9 +53,11 @@
 #ifndef _KERN_PERCPU_H
 #define _KERN_PERCPU_H
 
+#include <assert.h>
+#include <stddef.h>
 #include <stdint.h>
 
-#include <kern/assert.h>
+#include <kern/init.h>
 #include <kern/macros.h>
 
 #define PERCPU_SECTION .percpu
@@ -68,7 +70,7 @@
  * itself has different addresses.
  */
 extern char _percpu;
-extern char _epercpu;
+extern char _percpu_end;
 
 /*
  * Expands to the address of a percpu variable.
@@ -94,25 +96,6 @@ percpu_area(unsigned int cpu)
 }
 
 /*
- * Early initialization of the percpu module.
- *
- * This function registers the percpu section as the percpu area of the
- * BSP. If a percpu variable is modified before calling percpu_setup(),
- * the modification will be part of the percpu section and propagated to
- * new percpu areas.
- */
-void percpu_bootstrap(void);
-
-/*
- * Complete initialization of the percpu module.
- *
- * The BSP keeps using the percpu section, but its content is copied to a
- * dedicated block of memory used as a template for subsequently added
- * processors.
- */
-void percpu_setup(void);
-
-/*
  * Register a processor.
  *
  * This function creates a percpu area from kernel virtual memory for the
@@ -122,8 +105,15 @@ void percpu_setup(void);
 int percpu_add(unsigned int cpu);
 
 /*
- * Release init data allocated for setup.
+ * This init operation provides :
+ *  - percpu section is registered as the BSP percpu area
  */
-void percpu_cleanup(void);
+INIT_OP_DECLARE(percpu_bootstrap);
+
+/*
+ * This init operation provides :
+ *  - new percpu areas can be created
+ */
+INIT_OP_DECLARE(percpu_setup);
 
 #endif /* _KERN_PERCPU_H */

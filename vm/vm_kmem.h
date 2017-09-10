@@ -20,15 +20,17 @@
 
 #include <stdint.h>
 
+#include <kern/init.h>
+#include <machine/pmap.h>
 #include <machine/types.h>
 
 /*
  * The kernel space is required not to start at address 0, which is used to
  * report allocation errors.
  */
-#if VM_MIN_KMEM_ADDRESS == 0
-#error kernel space must not start at address 0
-#endif /* VM_MIN_KMEM_ADDRESS == 0 */
+#if PMAP_START_KMEM_ADDRESS == 0
+#error "kernel space must not start at address 0"
+#endif /* PMAP_START_KMEM_ADDRESS == 0 */
 
 /*
  * Special kernel addresses.
@@ -37,11 +39,6 @@ extern char _text;
 extern char _rodata;
 extern char _data;
 extern char _end;
-
-/*
- * The kernel map.
- */
-extern struct vm_map *kernel_map;
 
 /*
  * Allocate pure virtual kernel pages.
@@ -87,5 +84,11 @@ void * vm_kmem_map_pa(phys_addr_t pa, size_t size,
  * Unmap physical memory from the kernel map.
  */
 void vm_kmem_unmap_pa(uintptr_t map_va, size_t map_size);
+
+/*
+ * This init operation provides :
+ *  - kernel virtual memory allocation
+ */
+INIT_OP_DECLARE(vm_kmem_setup);
 
 #endif /* _VM_VM_KMEM_H */

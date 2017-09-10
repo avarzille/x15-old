@@ -33,11 +33,14 @@
 #ifndef _KERN_THREAD_H
 #define _KERN_THREAD_H
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdnoreturn.h>
 
-#include <kern/assert.h>
 #include <kern/atomic.h>
+#include <kern/init.h>
 #include <kern/condition.h>
 #include <kern/cpumap.h>
 #include <kern/macros.h>
@@ -162,18 +165,16 @@ thread_attr_set_priority(struct thread_attr *attr, unsigned short priority)
 }
 
 /*
- * Early initialization of the thread module.
+ * Thread entry point.
  *
- * These function make it possible to use migration and preemption control
- * operations (and in turn, spin locks) during bootstrap.
+ * Loaded TCBs are expected to call this function with interrupts disabled.
  */
-void thread_bootstrap(void);
-void thread_ap_bootstrap(void);
+void thread_main(void (*fn)(void *), void *arg);
 
 /*
- * Initialize the thread module.
+ * Initialization of the thread module on APs.
  */
-void thread_setup(void);
+void thread_ap_setup(void);
 
 /*
  * Create a thread.
@@ -188,7 +189,7 @@ int thread_create(struct thread **threadp, const struct thread_attr *attr,
 /*
  * Terminate the calling thread.
  */
-void __noreturn thread_exit(void);
+noreturn void thread_exit(void);
 
 /*
  * Wait for the given thread to terminate and release its resources.
@@ -211,24 +212,36 @@ void thread_join(struct thread *thread);
  * address should refer to a relevant synchronization object, normally
  * containing the interlock, but not necessarily.
  *
+ * When bounding the duration of the sleep, the caller must pass an absolute
+ * time in ticks, and ERROR_TIMEDOUT is returned if that time is reached
+ * before the thread is awaken.
+ *
  * Implies a memory barrier.
  */
 void thread_sleep(struct spinlock *interlock, const void *wchan_addr,
                   const char *wchan_desc);
+int thread_timedsleep(struct spinlock *interlock, const void *wchan_addr,
+                      const char *wchan_desc, uint64_t ticks);
 
 /*
  * Schedule a thread for execution on a processor.
  *
- * No action is performed if the target thread is already in the running state.
+ * If the target thread is NULL, the calling thread, or already in the
+ * running state, no action is performed and ERROR_INVAL is returned.
  */
-void thread_wakeup(struct thread *thread);
+int thread_wakeup(struct thread *thread);
+
+/*
+ * Suspend execution of the calling thread.
+ */
+void thread_delay(uint64_t ticks, bool absolute);
 
 /*
  * Start running threads on the local processor.
  *
  * Interrupts must be disabled when calling this function.
  */
-void __noreturn thread_run_scheduler(void);
+noreturn void thread_run_scheduler(void);
 
 /*
  * Make the calling thread release the processor.
@@ -245,10 +258,11 @@ void thread_yield(void);
 void thread_schedule_intr(void);
 
 /*
- * Report a periodic timer interrupt on the thread currently running on
- * the local processor.
+ * Report a periodic event on the current processor.
+ *
+ * Interrupts and preemption must be disabled when calling this function.
  */
-void thread_tick_intr(void);
+void thread_report_periodic_event(void);
 
 /*
  * Set thread scheduling parameters.
@@ -268,9 +282,9 @@ void thread_pi_setscheduler(struct thread *thread, unsigned char policy,
 static inline void
 thread_ref(struct thread *thread)
 {
-    unsigned long nr_refs;
+    __unused unsigned long nr_refs;
 
-    nr_refs = atomic_fetch_add(&thread->nr_refs, 1, ATOMIC_ACQUIRE);
+    nr_refs = atomic_fetch_add(&thread->nr_refs, 1, ATOMIC_RELAXED);
     assert(nr_refs != (unsigned long)-1);
 }
 
@@ -279,11 +293,11 @@ thread_unref(struct thread *thread)
 {
     unsigned long nr_refs;
 
-    nr_refs = atomic_fetch_sub(&thread->nr_refs, 1, ATOMIC_RELEASE);
+    nr_refs = atomic_fetch_sub_acq_rel(&thread->nr_refs, 1);
     assert(nr_refs != 0);
 
     if (nr_refs == 1) {
-        thread_destroy(thread);
+        thread_terminate(thread);
     }
 }
 
@@ -378,6 +392,12 @@ thread_real_global_priority(const struct thread *thread)
  */
 const char * thread_sched_class_to_str(unsigned char sched_class);
 
+static inline struct tcb *
+thread_get_tcb(struct thread *thread)
+{
+    return &thread->tcb;
+}
+
 static inline struct thread *
 thread_from_tcb(struct tcb *tcb)
 {
@@ -394,20 +414,8 @@ thread_self(void)
  * Main scheduler invocation call.
  *
  * Called on return from interrupt or when reenabling preemption.
- *
- * Implies a compiler barrier.
  */
-static inline void
-thread_schedule(void)
-{
-    barrier();
-
-    if (likely(!thread_test_flag(thread_self(), THREAD_YIELD))) {
-        return;
-    }
-
-    thread_yield();
-}
+void thread_schedule(void);
 
 /*
  * Sleep queue lending functions.
@@ -568,6 +576,17 @@ thread_preempt_enabled(void)
 }
 
 static inline void
+thread_preempt_disable(void)
+{
+    struct thread *thread;
+
+    thread = thread_self();
+    thread->preempt++;
+    assert(thread->preempt != 0);
+    barrier();
+}
+
+static inline void
 thread_preempt_enable_no_resched(void)
 {
     struct thread *thread;
@@ -577,27 +596,38 @@ thread_preempt_enable_no_resched(void)
     assert(thread->preempt != 0);
     thread->preempt--;
 
-    if (thread_preempt_enabled() && thread_priority_propagation_needed()) {
-        thread_propagate_priority();
-    }
+    /*
+     * Don't perform priority propagation here, because this function is
+     * called on return from interrupt, where the transient state may
+     * incorrectly trigger it.
+     */
 }
 
 static inline void
 thread_preempt_enable(void)
 {
     thread_preempt_enable_no_resched();
+
+    if (thread_priority_propagation_needed()
+        && thread_preempt_enabled()) {
+        thread_propagate_priority();
+    }
+
     thread_schedule();
 }
 
 static inline void
-thread_preempt_disable(void)
+thread_preempt_disable_intr_save(unsigned long *flags)
 {
-    struct thread *thread;
+    thread_preempt_disable();
+    cpu_intr_save(flags);
+}
 
-    thread = thread_self();
-    thread->preempt++;
-    assert(thread->preempt != 0);
-    barrier();
+static inline void
+thread_preempt_enable_intr_restore(unsigned long flags)
+{
+    cpu_intr_restore(flags);
+    thread_preempt_enable();
 }
 
 /*
@@ -610,6 +640,14 @@ static inline bool
 thread_interrupted(void)
 {
     return (thread_self()->intr != 0);
+}
+
+static inline bool
+thread_check_intr_context(void)
+{
+    return thread_interrupted()
+           && !cpu_intr_enabled()
+           && !thread_preempt_enabled();
 }
 
 static inline void
@@ -641,14 +679,6 @@ thread_intr_leave(void)
     if (thread->intr == 0) {
         thread_preempt_enable_no_resched();
     }
-}
-
-static inline void
-thread_assert_interrupted(void)
-{
-    assert(thread_interrupted());
-    assert(!cpu_intr_enabled());
-    assert(!thread_preempt_enabled());
 }
 
 /*
@@ -735,5 +765,33 @@ thread_get_specific(unsigned int key)
 {
     return thread_tsd_get(thread_self(), key);
 }
+
+/*
+ * Return true if the given thread is running.
+ *
+ * Note that this check is speculative, and may not return an accurate
+ * result. It may only be used for optimistic optimizations.
+ */
+bool thread_is_running(const struct thread *thread);
+
+/*
+ * This init operation provides :
+ *  - a dummy thread context for the BSP, allowing the use of thread_self()
+ */
+INIT_OP_DECLARE(thread_setup_booter);
+
+/*
+ * This init operation provides :
+ *  - same as thread_setup_booter
+ *  - BSP run queue initialization
+ */
+INIT_OP_DECLARE(thread_bootstrap);
+
+/*
+ * This init operation provides :
+ *  - thread creation
+ *  - module fully initialized
+ */
+INIT_OP_DECLARE(thread_setup);
 
 #endif /* _KERN_THREAD_H */

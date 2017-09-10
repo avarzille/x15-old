@@ -41,21 +41,20 @@
  * TODO Reconsider whether it's possible to bring back local review queues.
  */
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stddef.h>
 
-#include <kern/assert.h>
 #include <kern/condition.h>
 #include <kern/cpumap.h>
 #include <kern/error.h>
 #include <kern/init.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
 #include <kern/spinlock.h>
-#include <kern/sprintf.h>
 #include <kern/sref.h>
 #include <kern/sref_i.h>
 #include <kern/syscnt.h>
@@ -243,7 +242,7 @@ sref_queue_concat(struct sref_queue *queue1, struct sref_queue *queue2)
     queue1->size += queue2->size;
 }
 
-static inline bool
+__unused static inline bool
 sref_counter_aligned(const struct sref_counter *counter)
 {
     return (((uintptr_t)counter & (~SREF_WEAKREF_MASK)) == 0);
@@ -259,13 +258,13 @@ sref_weakref_init(struct sref_weakref *weakref, struct sref_counter *counter)
 static void
 sref_weakref_mark_dying(struct sref_weakref *weakref)
 {
-    atomic_or_acq_rel(&weakref->addr, SREF_WEAKREF_DYING);
+    atomic_or(&weakref->addr, SREF_WEAKREF_DYING, ATOMIC_RELEASE);
 }
 
 static void
 sref_weakref_clear_dying(struct sref_weakref *weakref)
 {
-    atomic_and_acq_rel(&weakref->addr, SREF_WEAKREF_MASK);
+    atomic_and(&weakref->addr, SREF_WEAKREF_MASK, ATOMIC_RELEASE);
 }
 
 static int
@@ -273,8 +272,8 @@ sref_weakref_kill(struct sref_weakref *weakref)
 {
     uintptr_t addr, oldval;
 
-    addr = weakref->addr | SREF_WEAKREF_DYING;
-    oldval = atomic_cas_release(&weakref->addr, addr, (uintptr_t)NULL);
+    addr = atomic_load(&weakref->addr, ATOMIC_RELAXED) | SREF_WEAKREF_DYING;
+    oldval = atomic_cas(&weakref->addr, addr, (uintptr_t)NULL, ATOMIC_RELAXED);
 
     if (oldval != addr) {
         assert((oldval & SREF_WEAKREF_MASK) == (addr & SREF_WEAKREF_MASK));
@@ -290,9 +289,9 @@ sref_weakref_tryget(struct sref_weakref *weakref)
     uintptr_t addr, oldval, newval;
 
     do {
-        addr = weakref->addr;
+        addr = atomic_load(&weakref->addr, ATOMIC_RELAXED);
         newval = addr & SREF_WEAKREF_MASK;
-        oldval = atomic_cas_acquire(&weakref->addr, addr, newval);
+        oldval = atomic_cas(&weakref->addr, addr, newval, ATOMIC_RELAXED);
     } while (oldval != addr);
 
     return (struct sref_counter *)newval;
@@ -503,7 +502,7 @@ sref_end_epoch(struct sref_queue *queue)
     if (!sref_data.no_warning
         && (sref_review_queue_size() >= SREF_NR_COUNTERS_WARN)) {
         sref_data.no_warning = 1;
-        printk("sref: warning: large number of counters in review queue\n");
+        log_warning("sref: large number of counters in review queue");
     }
 
     if (sref_data.nr_registered_cpus == 1) {
@@ -799,15 +798,13 @@ sref_manage(void *arg)
     cache = arg;
 
     for (;;) {
-        thread_preempt_disable();
-        cpu_intr_save(&flags);
+        thread_preempt_disable_intr_save(&flags);
 
         while (!sref_cache_is_dirty(cache)) {
             thread_sleep(NULL, cache, "sref");
         }
 
-        cpu_intr_restore(flags);
-        thread_preempt_enable();
+        thread_preempt_enable_intr_restore(flags);
 
         sref_cache_flush(cache, &queue);
         sref_review(&queue);
@@ -816,7 +813,7 @@ sref_manage(void *arg)
     /* Never reached */
 }
 
-void __init
+static int __init
 sref_bootstrap(void)
 {
     spinlock_init(&sref_data.lock);
@@ -828,7 +825,12 @@ sref_bootstrap(void)
     syscnt_register(&sref_data.sc_true_zeroes, "sref_true_zeroes");
 
     sref_cache_init(sref_cache_get(), 0);
+
+    return 0;
 }
+
+INIT_OP_DEFINE(sref_bootstrap,
+               INIT_OP_DEP(syscnt_setup, true));
 
 static void __init
 sref_setup_manager(struct sref_cache *cache, unsigned int cpu)
@@ -861,7 +863,7 @@ sref_setup_manager(struct sref_cache *cache, unsigned int cpu)
     cache->manager = manager;
 }
 
-void __init
+static int __init
 sref_setup(void)
 {
     unsigned int i;
@@ -873,7 +875,18 @@ sref_setup(void)
     for (i = 0; i < cpu_count(); i++) {
         sref_setup_manager(percpu_ptr(sref_cache, i), i);
     }
+
+    return 0;
 }
+
+INIT_OP_DEFINE(sref_setup,
+               INIT_OP_DEP(cpu_mp_probe, true),
+               INIT_OP_DEP(log_setup, true),
+               INIT_OP_DEP(mutex_setup, true),
+               INIT_OP_DEP(panic_setup, true),
+               INIT_OP_DEP(sref_bootstrap, true),
+               INIT_OP_DEP(syscnt_setup, true),
+               INIT_OP_DEP(thread_setup, true));
 
 void
 sref_register(void)
@@ -971,13 +984,11 @@ sref_report_periodic_event(void)
 {
     struct sref_cache *cache;
 
-    assert(!cpu_intr_enabled());
-    assert(!thread_preempt_enabled());
+    assert(thread_check_intr_context());
 
     cache = sref_cache_get();
 
-    if (!sref_cache_is_registered(cache)
-        || (cache->manager == thread_self())) {
+    if (!sref_cache_is_registered(cache)) {
         return;
     }
 

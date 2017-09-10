@@ -16,33 +16,41 @@
  *
  *
  * Physical page management.
+ *
+ * A page is said to be managed if it's linked to a VM object, in which
+ * case there is at least one reference to it.
  */
 
 #ifndef _VM_VM_PAGE_H
 #define _VM_VM_PAGE_H
 
+#include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include <kern/assert.h>
+#include <kern/atomic.h>
+#include <kern/init.h>
 #include <kern/list.h>
 #include <kern/log2.h>
 #include <kern/macros.h>
-#include <kern/param.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
+#include <machine/pmem.h>
 #include <machine/types.h>
+#include <vm/vm_object_types.h>
 
 /*
- * Address/page conversion and rounding macros (not inline functions to
+ * Byte/page conversion and rounding macros (not inline functions to
  * be easily usable on both virtual and physical addresses, which may not
  * have the same type size).
  */
-#define vm_page_atop(addr)      ((addr) >> PAGE_SHIFT)
-#define vm_page_ptoa(page)      ((page) << PAGE_SHIFT)
-#define vm_page_trunc(addr)     P2ALIGN(addr, PAGE_SIZE)
-#define vm_page_round(addr)     P2ROUND(addr, PAGE_SIZE)
-#define vm_page_end(addr)       P2END(addr, PAGE_SIZE)
-#define vm_page_aligned(addr)   P2ALIGNED(addr, PAGE_SIZE)
+#define vm_page_btop(bytes)     ((bytes) >> PAGE_SHIFT)
+#define vm_page_ptob(pages)     ((pages) << PAGE_SHIFT)
+#define vm_page_trunc(bytes)    P2ALIGN(bytes, PAGE_SIZE)
+#define vm_page_round(bytes)    P2ROUND(bytes, PAGE_SIZE)
+#define vm_page_end(bytes)      P2END(bytes, PAGE_SIZE)
+#define vm_page_aligned(bytes)  P2ALIGNED(bytes, PAGE_SIZE)
 
 /*
  * Zone selectors.
@@ -79,6 +87,12 @@ struct vm_page {
     unsigned short order;
     phys_addr_t phys_addr;
     void *priv;
+
+    unsigned int nr_refs;
+
+    /* VM object back reference */
+    struct vm_object *object;
+    uint64_t offset;
 };
 
 static inline unsigned short
@@ -93,7 +107,7 @@ void vm_page_set_type(struct vm_page *page, unsigned int order,
 static inline unsigned int
 vm_page_order(size_t size)
 {
-    return iorder2(vm_page_atop(vm_page_round(size)));
+    return iorder2(vm_page_btop(vm_page_round(size)));
 }
 
 static inline phys_addr_t
@@ -105,16 +119,16 @@ vm_page_to_pa(const struct vm_page *page)
 static inline uintptr_t
 vm_page_direct_va(phys_addr_t pa)
 {
-    assert(pa < VM_PAGE_DIRECTMAP_LIMIT);
-    return ((uintptr_t)pa + VM_MIN_DIRECTMAP_ADDRESS);
+    assert(pa < PMEM_DIRECTMAP_LIMIT);
+    return ((uintptr_t)pa + PMAP_START_DIRECTMAP_ADDRESS);
 }
 
 static inline phys_addr_t
 vm_page_direct_pa(uintptr_t va)
 {
-    assert(va >= VM_MIN_DIRECTMAP_ADDRESS);
-    assert(va < VM_MAX_DIRECTMAP_ADDRESS);
-    return (va - VM_MIN_DIRECTMAP_ADDRESS);
+    assert(va >= PMAP_START_DIRECTMAP_ADDRESS);
+    assert(va < PMAP_END_DIRECTMAP_ADDRESS);
+    return (va - PMAP_START_DIRECTMAP_ADDRESS);
 }
 
 static inline void *
@@ -136,6 +150,21 @@ static inline void *
 vm_page_get_priv(const struct vm_page *page)
 {
     return page->priv;
+}
+
+static inline void
+vm_page_link(struct vm_page *page, struct vm_object *object, uint64_t offset)
+{
+    assert(object != NULL);
+    page->object = object;
+    page->offset = offset;
+}
+
+static inline void
+vm_page_unlink(struct vm_page *page)
+{
+    assert(page->object != NULL);
+    page->object = NULL;
 }
 
 /*
@@ -162,19 +191,6 @@ void vm_page_load_heap(unsigned int zone_index, phys_addr_t start,
 int vm_page_ready(void);
 
 /*
- * Set up the vm_page module.
- *
- * Architecture-specific code must have loaded zones before calling this
- * function. Zones must comply with the selector-to-zone-list table,
- * e.g. HIGHMEM is loaded if and only if DIRECTMAP, DMA32 and DMA are loaded,
- * notwithstanding zone aliasing.
- *
- * Once this function returns, the vm_page module is ready, and normal
- * allocation functions can be used.
- */
-void vm_page_setup(void);
-
-/*
  * Make the given page managed by the vm_page module.
  *
  * If additional memory can be made usable after the VM system is initialized,
@@ -192,12 +208,16 @@ struct vm_page * vm_page_lookup(phys_addr_t pa);
  *
  * The selector is used to determine the zones from which allocation can
  * be attempted.
+ *
+ * If successful, the returned pages have no references.
  */
 struct vm_page * vm_page_alloc(unsigned int order, unsigned int selector,
                                unsigned short type);
 
 /*
  * Release a block of 2^order physical pages.
+ *
+ * The pages must have no references.
  */
 void vm_page_free(struct vm_page *page, unsigned int order);
 
@@ -207,8 +227,60 @@ void vm_page_free(struct vm_page *page, unsigned int order);
 const char * vm_page_zone_name(unsigned int zone_index);
 
 /*
- * Display internal information about the module.
+ * Log information about physical pages.
  */
-void vm_page_info(void);
+void vm_page_log_info(void);
+
+static inline bool
+vm_page_referenced(const struct vm_page *page)
+{
+    return atomic_load(&page->nr_refs, ATOMIC_RELAXED) != 0;
+}
+
+static inline void
+vm_page_ref(struct vm_page *page)
+{
+    __unused unsigned int nr_refs;
+
+    nr_refs = atomic_fetch_add(&page->nr_refs, 1, ATOMIC_RELAXED);
+    assert(nr_refs != (unsigned int)-1);
+}
+
+static inline void
+vm_page_unref(struct vm_page *page)
+{
+    unsigned int nr_refs;
+
+    nr_refs = atomic_fetch_sub_acq_rel(&page->nr_refs, 1);
+    assert(nr_refs != 0);
+
+    if (nr_refs == 1) {
+        vm_page_free(page, 0);
+    }
+}
+
+static inline int
+vm_page_tryref(struct vm_page *page)
+{
+    unsigned int nr_refs, prev;
+
+    do {
+        nr_refs = atomic_load(&page->nr_refs, ATOMIC_RELAXED);
+
+        if (nr_refs == 0) {
+            return ERROR_AGAIN;
+        }
+
+        prev = atomic_cas_acquire(&page->nr_refs, nr_refs, nr_refs + 1);
+    } while (prev != nr_refs);
+
+    return 0;
+}
+
+/*
+ * This init operation provides :
+ *  - module fully initialized
+ */
+INIT_OP_DECLARE(vm_page_setup);
 
 #endif /* _VM_VM_PAGE_H */

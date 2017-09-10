@@ -41,14 +41,15 @@
  * TODO Rework the CPU pool layer to use the SLQB algorithm by Nick Piggin.
  */
 
+#include <assert.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
-#include <kern/assert.h>
 #include <kern/init.h>
-#include <kern/limits.h>
 #include <kern/list.h>
 #include <kern/log2.h>
 #include <kern/kmem.h>
@@ -56,11 +57,10 @@
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
-#include <kern/printk.h>
-#include <kern/sprintf.h>
+#include <kern/shell.h>
 #include <kern/thread.h>
 #include <machine/cpu.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
 #include <vm/vm_kmem.h>
 #include <vm/vm_page.h>
@@ -232,7 +232,7 @@ kmem_bufctl_to_buf(union kmem_bufctl *bufctl, struct kmem_cache *cache)
 }
 
 static inline bool
-kmem_pagealloc_virtual(size_t size)
+kmem_pagealloc_is_virtual(size_t size)
 {
     return (size > PAGE_SIZE);
 }
@@ -240,7 +240,7 @@ kmem_pagealloc_virtual(size_t size)
 static void *
 kmem_pagealloc(size_t size)
 {
-    if (kmem_pagealloc_virtual(size)) {
+    if (kmem_pagealloc_is_virtual(size)) {
         return vm_kmem_alloc(size);
     } else {
         struct vm_page *page;
@@ -259,7 +259,7 @@ kmem_pagealloc(size_t size)
 static void
 kmem_pagefree(void *ptr, size_t size)
 {
-    if (kmem_pagealloc_virtual(size)) {
+    if (kmem_pagealloc_is_virtual(size)) {
         vm_kmem_free(ptr, size);
     } else {
         struct vm_page *page;
@@ -441,7 +441,7 @@ kmem_cache_error(struct kmem_cache *cache, void *buf, int error, void *arg)
 {
     struct kmem_buftag *buftag;
 
-    printk("kmem: error: cache: %s, buffer: %p\n", cache->name, buf);
+    printf("kmem: error: cache: %s, buffer: %p\n", cache->name, buf);
 
     switch(error) {
     case KMEM_ERR_INVALID:
@@ -646,12 +646,12 @@ kmem_cache_register(struct kmem_cache *cache, struct kmem_slab *slab)
     uintptr_t va, end;
     phys_addr_t pa;
     bool virtual;
-    int error;
+    __unused int error;
 
     assert(kmem_cache_registration_required(cache));
     assert(slab->nr_refs == 0);
 
-    virtual = kmem_pagealloc_virtual(cache->slab_size);
+    virtual = kmem_pagealloc_is_virtual(cache->slab_size);
 
     for (va = kmem_slab_buf(slab), end = va + cache->slab_size;
          va < end;
@@ -684,7 +684,7 @@ kmem_cache_lookup(struct kmem_cache *cache, void *buf)
 
     assert(kmem_cache_registration_required(cache));
 
-    virtual = kmem_pagealloc_virtual(cache->slab_size);
+    virtual = kmem_pagealloc_is_virtual(cache->slab_size);
     va = (uintptr_t)buf;
 
     if (virtual) {
@@ -1093,41 +1093,28 @@ kmem_cache_info(struct kmem_cache *cache)
 {
     char flags_str[64];
 
-    if (cache == NULL) {
-        mutex_lock(&kmem_cache_list_lock);
-
-        list_for_each_entry(&kmem_cache_list, cache, node) {
-            kmem_cache_info(cache);
-        }
-
-        mutex_unlock(&kmem_cache_list_lock);
-
-        return;
-    }
-
     snprintf(flags_str, sizeof(flags_str), "%s%s",
              (cache->flags & KMEM_CF_SLAB_EXTERNAL) ? " SLAB_EXTERNAL" : "",
              (cache->flags & KMEM_CF_VERIFY) ? " VERIFY" : "");
 
     mutex_lock(&cache->lock);
 
-    printk("kmem: name: %s\n"
-           "kmem: flags: 0x%x%s\n"
-           "kmem: obj_size: %zu\n"
-           "kmem: align: %zu\n"
-           "kmem: buf_size: %zu\n"
-           "kmem: bufctl_dist: %zu\n"
-           "kmem: slab_size: %zu\n"
-           "kmem: color_max: %zu\n"
+    printf("kmem:         flags: 0x%x%s\n"
+           "kmem:      obj_size: %zu\n"
+           "kmem:         align: %zu\n"
+           "kmem:      buf_size: %zu\n"
+           "kmem:   bufctl_dist: %zu\n"
+           "kmem:     slab_size: %zu\n"
+           "kmem:     color_max: %zu\n"
            "kmem: bufs_per_slab: %lu\n"
-           "kmem: nr_objs: %lu\n"
-           "kmem: nr_bufs: %lu\n"
-           "kmem: nr_slabs: %lu\n"
+           "kmem:       nr_objs: %lu\n"
+           "kmem:       nr_bufs: %lu\n"
+           "kmem:      nr_slabs: %lu\n"
            "kmem: nr_free_slabs: %lu\n"
-           "kmem: buftag_dist: %zu\n"
-           "kmem: redzone_pad: %zu\n"
-           "kmem: cpu_pool_size: %d\n", cache->name, cache->flags, flags_str,
-           cache->obj_size, cache->align, cache->buf_size, cache->bufctl_dist,
+           "kmem:   buftag_dist: %zu\n"
+           "kmem:   redzone_pad: %zu\n"
+           "kmem: cpu_pool_size: %d\n", cache->flags, flags_str, cache->obj_size,
+           cache->align, cache->buf_size, cache->bufctl_dist,
            cache->slab_size, cache->color_max, cache->bufs_per_slab,
            cache->nr_objs, cache->nr_bufs, cache->nr_slabs,
            cache->nr_free_slabs, cache->buftag_dist, cache->redzone_pad,
@@ -1136,8 +1123,71 @@ kmem_cache_info(struct kmem_cache *cache)
     mutex_unlock(&cache->lock);
 }
 
-void __init
-kmem_setup(void)
+#ifdef X15_ENABLE_SHELL
+
+static struct kmem_cache *
+kmem_lookup_cache(const char *name)
+{
+    struct kmem_cache *cache;
+
+    mutex_lock(&kmem_cache_list_lock);
+
+    list_for_each_entry(&kmem_cache_list, cache, node) {
+        if (strcmp(cache->name, name) == 0) {
+            goto out;
+        }
+    }
+
+    cache = NULL;
+
+out:
+    mutex_unlock(&kmem_cache_list_lock);
+
+    return cache;
+}
+
+static void
+kmem_shell_info(int argc, char **argv)
+{
+    struct kmem_cache *cache;
+
+    if (argc < 2) {
+        kmem_info();
+    } else {
+        cache = kmem_lookup_cache(argv[1]);
+
+        if (cache == NULL) {
+            printf("kmem: info: invalid argument\n");
+            return;
+        }
+
+        kmem_cache_info(cache);
+    }
+}
+
+static struct shell_cmd kmem_shell_cmds[] = {
+    SHELL_CMD_INITIALIZER("kmem_info", kmem_shell_info,
+        "kmem_info [<cache_name>]",
+        "display information about kernel memory and caches"),
+};
+
+static int __init
+kmem_setup_shell(void)
+{
+    SHELL_REGISTER_CMDS(kmem_shell_cmds);
+    return 0;
+}
+
+INIT_OP_DEFINE(kmem_setup_shell,
+               INIT_OP_DEP(kmem_setup, true),
+               INIT_OP_DEP(printf_setup, true),
+               INIT_OP_DEP(shell_setup, true),
+               INIT_OP_DEP(thread_setup, true));
+
+#endif /* X15_ENABLE_SHELL */
+
+static int __init
+kmem_bootstrap(void)
 {
     struct kmem_cpu_pool_type *cpu_pool_type;
     char name[KMEM_NAME_SIZE];
@@ -1171,7 +1221,23 @@ kmem_setup(void)
         kmem_cache_init(&kmem_caches[i], name, size, 0, NULL, 0);
         size <<= 1;
     }
+
+    return 0;
 }
+
+INIT_OP_DEFINE(kmem_bootstrap,
+               INIT_OP_DEP(thread_bootstrap, true),
+               INIT_OP_DEP(vm_page_setup, true));
+
+static int __init
+kmem_setup(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(kmem_setup,
+               INIT_OP_DEP(kmem_bootstrap, true),
+               INIT_OP_DEP(vm_kmem_setup, true));
 
 static inline size_t
 kmem_get_index(unsigned long size)
@@ -1283,10 +1349,19 @@ kmem_free(void *ptr, size_t size)
 void
 kmem_info(void)
 {
+    size_t total_reclaim, total_reclaim_physical, total_reclaim_virtual;
+    size_t total, total_physical, total_virtual;
+    size_t mem_usage, mem_reclaim;
     struct kmem_cache *cache;
-    size_t mem_usage, mem_reclaimable;
 
-    printk("kmem: cache                  obj slab  bufs   objs   bufs "
+    total = 0;
+    total_physical = 0;
+    total_virtual = 0;
+    total_reclaim = 0;
+    total_reclaim_physical = 0;
+    total_reclaim_virtual = 0;
+
+    printf("kmem: cache                  obj slab  bufs   objs   bufs "
            "   total reclaimable\n"
            "kmem: name                  size size /slab  usage  count "
            "  memory      memory\n");
@@ -1297,15 +1372,30 @@ kmem_info(void)
         mutex_lock(&cache->lock);
 
         mem_usage = (cache->nr_slabs * cache->slab_size) >> 10;
-        mem_reclaimable = (cache->nr_free_slabs * cache->slab_size) >> 10;
+        mem_reclaim = (cache->nr_free_slabs * cache->slab_size) >> 10;
+        total += mem_usage;
+        total_reclaim += mem_reclaim;
 
-        printk("kmem: %-19s %6zu %3zuk  %4lu %6lu %6lu %7zuk %10zuk\n",
+        if (kmem_pagealloc_is_virtual(cache->slab_size)) {
+            total_virtual += mem_usage;
+            total_reclaim_virtual += mem_reclaim;
+        } else {
+            total_physical += mem_usage;
+            total_reclaim_physical += mem_reclaim;
+        }
+
+        printf("kmem: %-19s %6zu %3zuk  %4lu %6lu %6lu %7zuk %10zuk\n",
                cache->name, cache->obj_size, cache->slab_size >> 10,
                cache->bufs_per_slab, cache->nr_objs, cache->nr_bufs,
-               mem_usage, mem_reclaimable);
+               mem_usage, mem_reclaim);
 
         mutex_unlock(&cache->lock);
     }
 
     mutex_unlock(&kmem_cache_list_lock);
+
+    printf("total: %zuk (phys: %zuk virt: %zuk), "
+           "reclaim: %zuk (phys: %zuk virt: %zuk)\n",
+           total, total_physical, total_virtual,
+           total_reclaim, total_reclaim_physical, total_reclaim_virtual);
 }

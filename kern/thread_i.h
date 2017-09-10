@@ -18,16 +18,16 @@
 #ifndef _KERN_THREAD_I_H
 #define _KERN_THREAD_I_H
 
+#include <stdalign.h>
 #include <stdbool.h>
 
 #include <kern/atomic.h>
 #include <kern/condition_types.h>
 #include <kern/cpumap.h>
 #include <kern/list_types.h>
-#include <kern/macros.h>
-#include <kern/mutex_types.h>
-#include <kern/param.h>
+#include <kern/spinlock_types.h>
 #include <kern/turnstile_types.h>
+#include <machine/cpu.h>
 #include <machine/tcb.h>
 
 /*
@@ -95,19 +95,25 @@ struct thread_fs_data {
  * (a) atomic
  * (-) thread-local
  * ( ) read-only
+ *
+ * (*) The runq member is used to determine which run queue lock must be
+ * held to serialize access to the relevant members. However, it is only
+ * updated while the associated run queue is locked. As a result, atomic
+ * reads are only necessary outside critical sections.
  */
 struct thread {
-    struct tcb tcb;         /* (r) */
+    alignas(CPU_L1_SIZE) struct tcb tcb; /* (r) */
 
     unsigned long nr_refs;  /* (a) */
     unsigned long flags;    /* (a) */
 
     /* Sleep/wake-up synchronization members */
-    struct thread_runq *runq;   /* (r) */
-    bool in_runq;               /* (r) */
-    const void *wchan_addr;     /* (r) */
-    const char *wchan_desc;     /* (r) */
-    unsigned short state;       /* (r) */
+    struct thread_runq *runq;   /* (r,*) */
+    bool in_runq;               /* (r)   */
+    const void *wchan_addr;     /* (r)   */
+    const char *wchan_desc;     /* (r)   */
+    int wakeup_error;           /* (r)   */
+    unsigned short state;       /* (r)   */
 
     /* Sleep queue available for lending */
     struct sleepq *priv_sleepq; /* (-) */
@@ -162,31 +168,37 @@ struct thread {
     };
 
     /*
-     * Thread-specific data should only be used by architecture-dependent code.
-     * For machine-independent code, new member variables should be added.
+     * Thread-specific data.
      *
-     * TODO move those to the TCB and remove.
+     * TODO Make optional.
      */
     void *tsd[THREAD_KEYS_MAX];
 
-    /* Members related to termination */
-    struct mutex join_lock;
-    struct condition join_cond;     /* (j) */
-    int exited;                     /* (j) */
+    /*
+     * Members related to termination.
+     *
+     * The termination protocol is made of two steps :
+     *  1/ The thread exits, thereby releasing its self reference, and
+     *     sets its state to dead before calling the scheduler.
+     *  2/ Another thread must either already be joining, or join later.
+     *     When the thread reference counter drops to zero, the terminating
+     *     flag is set, and the joining thread is awaken, if any. After that,
+     *     the join operation polls the state until it sees the target thread
+     *     as dead, and then releases its resources.
+     */
+    struct thread *join_waiter;     /* (j) */
+    struct spinlock join_lock;
+    bool terminating;               /* (j) */
 
     struct task *task;              /* (T) */
     struct list task_node;          /* (T) */
     void *stack;                    /* (-) */
     char name[THREAD_NAME_SIZE];    /* ( ) */
-
-    /* TODO Move out of the structure and make temporary */
-    void (*fn)(void *);
-    void *arg;
-} __aligned(CPU_L1_SIZE);
+};
 
 #define THREAD_ATTR_DETACHED 0x1
 
-void thread_destroy(struct thread *thread);
+void thread_terminate(struct thread *thread);
 
 /*
  * Flag access functions.
@@ -195,13 +207,13 @@ void thread_destroy(struct thread *thread);
 static inline void
 thread_set_flag(struct thread *thread, unsigned long flag)
 {
-    atomic_or_acq_rel(&thread->flags, flag);
+    atomic_or(&thread->flags, flag, ATOMIC_RELEASE);
 }
 
 static inline void
 thread_clear_flag(struct thread *thread, unsigned long flag)
 {
-    atomic_and_acq_rel(&thread->flags, ~flag);
+    atomic_and(&thread->flags, ~flag, ATOMIC_RELEASE);
 }
 
 static inline int

@@ -54,7 +54,7 @@
  *
  * A few terms are used by both papers with slightly different meanings. Here
  * are the definitions used in this implementation :
- *  - The time unit is the system timer period (1 / HZ)
+ *  - The time unit is the system timer period (1 / tick frequency)
  *  - Work is the amount of execution time units consumed
  *  - Weight is the amount of execution time units allocated
  *  - A round is the shortest period during which all threads in a run queue
@@ -81,12 +81,17 @@
  * weights in a smoother way than a raw scaling).
  */
 
+#include <assert.h>
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdnoreturn.h>
 #include <string.h>
 
-#include <kern/assert.h>
 #include <kern/atomic.h>
+#include <kern/clock.h>
 #include <kern/condition.h>
 #include <kern/cpumap.h>
 #include <kern/error.h>
@@ -95,23 +100,23 @@
 #include <kern/list.h>
 #include <kern/llsync.h>
 #include <kern/macros.h>
-#include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
+#include <kern/shell.h>
 #include <kern/sleepq.h>
 #include <kern/spinlock.h>
-#include <kern/sprintf.h>
 #include <kern/sref.h>
 #include <kern/syscnt.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+#include <kern/timer.h>
 #include <kern/turnstile.h>
 #include <kern/work.h>
 #include <machine/cpu.h>
-#include <machine/mb.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
 #include <machine/tcb.h>
+#include <vm/vm_kmem.h>
 #include <vm/vm_map.h>
 
 /*
@@ -158,7 +163,7 @@
 /*
  * Default time slice for real-time round-robin scheduling.
  */
-#define THREAD_DEFAULT_RR_TIME_SLICE (HZ / 10)
+#define THREAD_DEFAULT_RR_TIME_SLICE (CLOCK_FREQ / 10)
 
 /*
  * Maximum number of threads which can be pulled from a remote run queue
@@ -169,7 +174,7 @@
 /*
  * Delay (in ticks) between two balance attempts when a run queue is idle.
  */
-#define THREAD_IDLE_BALANCE_TICKS (HZ / 2)
+#define THREAD_IDLE_BALANCE_TICKS (CLOCK_FREQ / 2)
 
 /*
  * Run queue properties for real-time threads.
@@ -189,7 +194,7 @@ struct thread_rt_runq {
 /*
  * Round slice base unit for fair-scheduling threads.
  */
-#define THREAD_FS_ROUND_SLICE_BASE (HZ / 10)
+#define THREAD_FS_ROUND_SLICE_BASE (CLOCK_FREQ / 10)
 
 /*
  * Group of threads sharing the same weight.
@@ -226,7 +231,7 @@ struct thread_fs_runq {
  * return path) may violate the locking order.
  */
 struct thread_runq {
-    struct spinlock lock;
+    alignas(CPU_L1_SIZE) struct spinlock lock;
     unsigned int cpu;
     unsigned int nr_threads;
     struct thread *current;
@@ -255,9 +260,8 @@ struct thread_runq {
     unsigned int idle_balance_ticks;
 
     struct syscnt sc_schedule_intrs;
-    struct syscnt sc_tick_intrs;
     struct syscnt sc_boosts;
-} __aligned(CPU_L1_SIZE);
+};
 
 /*
  * Operations of a scheduling class.
@@ -285,9 +289,9 @@ static struct thread thread_booters[X15_MAX_CPUS] __initdata;
 
 static struct kmem_cache thread_cache;
 
-#ifndef X15_THREAD_STACK_GUARD
+#ifndef X15_ENABLE_THREAD_STACK_GUARD
 static struct kmem_cache thread_stack_cache;
-#endif /* X15_THREAD_STACK_GUARD */
+#endif /* X15_ENABLE_THREAD_STACK_GUARD */
 
 static const unsigned char thread_policy_table[THREAD_NR_SCHED_POLICIES] = {
     [THREAD_SCHED_POLICY_FIFO] = THREAD_SCHED_CLASS_RT,
@@ -321,7 +325,7 @@ static struct cpumap thread_idle_runqs;
  * There can be moderate bouncing on this word so give it its own cache line.
  */
 static struct {
-    volatile unsigned long value __aligned(CPU_L1_SIZE);
+    alignas(CPU_L1_SIZE) volatile unsigned long value;
 } thread_fs_highest_round_struct;
 
 #define thread_fs_highest_round (thread_fs_highest_round_struct.value)
@@ -336,15 +340,8 @@ static unsigned int thread_nr_keys __read_mostly;
  */
 static thread_dtor_fn_t thread_dtors[THREAD_KEYS_MAX] __read_mostly;
 
-/*
- * List of threads pending for destruction by the reaper.
- */
-static struct mutex thread_reap_lock;
-static struct condition thread_reap_cond;
-static struct list thread_reap_list;
-
 struct thread_zombie {
-    struct list node;
+    struct work work;
     struct thread *thread;
 };
 
@@ -456,8 +453,6 @@ thread_runq_init(struct thread_runq *runq, unsigned int cpu,
     runq->idle_balance_ticks = (unsigned int)-1;
     snprintf(name, sizeof(name), "thread_schedule_intrs/%u", cpu);
     syscnt_register(&runq->sc_schedule_intrs, name);
-    snprintf(name, sizeof(name), "thread_tick_intrs/%u", cpu);
-    syscnt_register(&runq->sc_tick_intrs, name);
     snprintf(name, sizeof(name), "thread_boosts/%u", cpu);
     syscnt_register(&runq->sc_boosts, name);
 }
@@ -481,7 +476,7 @@ thread_runq_add(struct thread_runq *runq, struct thread *thread)
     const struct thread_sched_ops *ops;
 
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
     assert(!thread->in_runq);
 
     ops = thread_get_real_sched_ops(thread);
@@ -498,7 +493,7 @@ thread_runq_add(struct thread_runq *runq, struct thread *thread)
         thread_set_flag(runq->current, THREAD_YIELD);
     }
 
-    thread->runq = runq;
+    atomic_store(&thread->runq, runq, ATOMIC_RELAXED);
     thread->in_runq = true;
 }
 
@@ -508,7 +503,7 @@ thread_runq_remove(struct thread_runq *runq, struct thread *thread)
     const struct thread_sched_ops *ops;
 
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
     assert(thread->in_runq);
 
     runq->nr_threads--;
@@ -529,7 +524,7 @@ thread_runq_put_prev(struct thread_runq *runq, struct thread *thread)
     const struct thread_sched_ops *ops;
 
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
 
     ops = thread_get_real_sched_ops(thread);
 
@@ -545,13 +540,13 @@ thread_runq_get_next(struct thread_runq *runq)
     unsigned int i;
 
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
 
     for (i = 0; i < ARRAY_SIZE(thread_sched_ops); i++) {
         thread = thread_sched_ops[i].get_next(runq);
 
         if (thread != NULL) {
-            runq->current = thread;
+            atomic_store(&runq->current, thread, ATOMIC_RELAXED);
             return thread;
         }
     }
@@ -571,26 +566,20 @@ thread_runq_set_next(struct thread_runq *runq, struct thread *thread)
         ops->set_next(runq, thread);
     }
 
-    runq->current = thread;
+    atomic_store(&runq->current, thread, ATOMIC_RELAXED);
 }
 
 static void
 thread_runq_wakeup(struct thread_runq *runq, struct thread *thread)
 {
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
     assert(thread->state == THREAD_RUNNING);
 
     thread_runq_add(runq, thread);
 
     if ((runq != thread_runq_local())
         && thread_test_flag(runq->current, THREAD_YIELD)) {
-        /*
-         * Make the new flags globally visible before sending the scheduling
-         * request. This barrier pairs with the one implied by the received IPI.
-         */
-        mb_store();
-
         cpu_send_thread_schedule(thread_runq_cpu(runq));
     }
 }
@@ -620,9 +609,11 @@ thread_runq_schedule(struct thread_runq *runq)
 
     prev = thread_self();
 
+    assert((__builtin_frame_address(0) >= prev->stack)
+           && (__builtin_frame_address(0) < (prev->stack + TCB_STACK_SIZE)));
     assert(prev->preempt == THREAD_SUSPEND_PREEMPT_LEVEL);
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
 
     llsync_report_context_switch();
 
@@ -667,7 +658,7 @@ thread_runq_schedule(struct thread_runq *runq)
 
     assert(prev->preempt == THREAD_SUSPEND_PREEMPT_LEVEL);
     assert(!cpu_intr_enabled());
-    spinlock_assert_locked(&runq->lock);
+    assert(spinlock_locked(&runq->lock));
     return runq;
 }
 
@@ -772,7 +763,8 @@ thread_sched_rt_get_next(struct thread_runq *runq)
 }
 
 static void
-thread_sched_rt_reset_priority(struct thread *thread, unsigned short priority)
+thread_sched_rt_reset_priority(struct thread *thread,
+                               __unused unsigned short priority)
 {
     assert(priority <= THREAD_SCHED_RT_PRIO_MAX);
     thread->rt_data.time_slice = THREAD_DEFAULT_RR_TIME_SLICE;
@@ -1286,8 +1278,7 @@ thread_sched_fs_balance_scan(struct thread_runq *runq,
 
     remote_runq = NULL;
 
-    thread_preempt_disable();
-    cpu_intr_save(&flags);
+    thread_preempt_disable_intr_save(&flags);
 
     cpumap_for_each(&thread_active_runqs, i) {
         tmp = percpu_ptr(thread_runq, i);
@@ -1321,8 +1312,7 @@ thread_sched_fs_balance_scan(struct thread_runq *runq,
         spinlock_unlock(&remote_runq->lock);
     }
 
-    cpu_intr_restore(flags);
-    thread_preempt_enable();
+    thread_preempt_enable_intr_restore(flags);
 
     return remote_runq;
 }
@@ -1453,8 +1443,7 @@ thread_sched_fs_balance(struct thread_runq *runq, unsigned long *flags)
     remote_runq = thread_sched_fs_balance_scan(runq, highest_round);
 
     if (remote_runq != NULL) {
-        thread_preempt_disable();
-        cpu_intr_save(flags);
+        thread_preempt_disable_intr_save(flags);
         thread_runq_double_lock(runq, remote_runq);
         nr_migrations = thread_sched_fs_balance_migrate(runq, remote_runq,
                                                         highest_round);
@@ -1481,8 +1470,7 @@ thread_sched_fs_balance(struct thread_runq *runq, unsigned long *flags)
             continue;
         }
 
-        thread_preempt_disable();
-        cpu_intr_save(flags);
+        thread_preempt_disable_intr_save(flags);
         thread_runq_double_lock(runq, remote_runq);
         nr_migrations = thread_sched_fs_balance_migrate(runq, remote_runq,
                                                         highest_round);
@@ -1520,7 +1508,7 @@ thread_sched_idle_select_runq(struct thread *thread)
     panic("thread: idler threads cannot be awaken");
 }
 
-static void __noreturn
+static noreturn void
 thread_sched_idle_panic(void)
 {
     panic("thread: only idle threads are allowed in the idle class");
@@ -1690,11 +1678,9 @@ thread_reset_real_priority(struct thread *thread)
 }
 
 static void __init
-thread_bootstrap_common(unsigned int cpu)
+thread_init_booter(unsigned int cpu)
 {
     struct thread *booter;
-
-    cpumap_set(&thread_active_runqs, cpu);
 
     /* Initialize only what's needed during bootstrap */
     booter = &thread_booters[cpu];
@@ -1708,13 +1694,23 @@ thread_bootstrap_common(unsigned int cpu)
     thread_set_user_priority(booter, 0);
     thread_reset_real_priority(booter);
     memset(booter->tsd, 0, sizeof(booter->tsd));
-    booter->task = kernel_task;
+    booter->task = task_get_kernel_task();
     snprintf(booter->name, sizeof(booter->name),
              THREAD_KERNEL_PREFIX "thread_boot/%u", cpu);
-    thread_runq_init(percpu_ptr(thread_runq, cpu), cpu, booter);
 }
 
-void __init
+static int __init
+thread_setup_booter(void)
+{
+    tcb_set_current(&thread_booters[0].tcb);
+    thread_init_booter(0);
+    return 0;
+}
+
+INIT_OP_DEFINE(thread_setup_booter,
+               INIT_OP_DEP(tcb_setup, true));
+
+static int __init
 thread_bootstrap(void)
 {
     cpumap_zero(&thread_active_runqs);
@@ -1722,18 +1718,17 @@ thread_bootstrap(void)
 
     thread_fs_highest_round = THREAD_FS_INITIAL_ROUND;
 
-    tcb_set_current(&thread_booters[0].tcb);
-    thread_bootstrap_common(0);
+    cpumap_set(&thread_active_runqs, 0);
+    thread_runq_init(cpu_local_ptr(thread_runq), 0, &thread_booters[0]);
+    return 0;
 }
 
-void __init
-thread_ap_bootstrap(void)
-{
-    tcb_set_current(&thread_booters[cpu_id()].tcb);
-}
+INIT_OP_DEFINE(thread_bootstrap,
+               INIT_OP_DEP(syscnt_setup, true),
+               INIT_OP_DEP(thread_setup_booter, true));
 
-static void
-thread_main(void)
+void
+thread_main(void (*fn)(void *), void *arg)
 {
     struct thread *thread;
 
@@ -1747,7 +1742,7 @@ thread_main(void)
     cpu_intr_enable();
     thread_preempt_enable();
 
-    thread->fn(thread->arg);
+    fn(arg);
     thread_exit();
 }
 
@@ -1828,20 +1823,18 @@ thread_init(struct thread *thread, void *stack,
     thread_set_user_priority(thread, attr->priority);
     thread_reset_real_priority(thread);
     memset(thread->tsd, 0, sizeof(thread->tsd));
-    mutex_init(&thread->join_lock);
-    condition_init(&thread->join_cond);
-    thread->exited = 0;
+    thread->join_waiter = NULL;
+    spinlock_init(&thread->join_lock);
+    thread->terminating = false;
     thread->task = task;
     thread->stack = stack;
     strlcpy(thread->name, attr->name, sizeof(thread->name));
-    thread->fn = fn;
-    thread->arg = arg;
 
     if (attr->flags & THREAD_ATTR_DETACHED) {
         thread->flags |= THREAD_DETACHED;
     }
 
-    error = tcb_init(&thread->tcb, stack, thread_main);
+    error = tcb_build(&thread->tcb, stack, fn, arg);
 
     if (error) {
         goto error_tcb;
@@ -1866,11 +1859,11 @@ thread_lock_runq(struct thread *thread, unsigned long *flags)
     struct thread_runq *runq;
 
     for (;;) {
-        runq = thread->runq;
+        runq = atomic_load(&thread->runq, ATOMIC_RELAXED);
 
         spinlock_lock_intr_save(&runq->lock, flags);
 
-        if (runq == thread->runq) {
+        if (runq == atomic_load(&thread->runq, ATOMIC_RELAXED)) {
             return runq;
         }
 
@@ -1884,7 +1877,7 @@ thread_unlock_runq(struct thread_runq *runq, unsigned long flags)
     spinlock_unlock_intr_restore(&runq->lock, flags);
 }
 
-#ifdef X15_THREAD_STACK_GUARD
+#ifdef X15_ENABLE_THREAD_STACK_GUARD
 
 #include <machine/pmap.h>
 #include <vm/vm_kmem.h>
@@ -1893,14 +1886,17 @@ thread_unlock_runq(struct thread_runq *runq, unsigned long flags)
 static void *
 thread_alloc_stack(void)
 {
-    struct vm_page *first_page, *last_page;
+    __unused struct vm_page *first_page, *last_page;
     phys_addr_t first_pa, last_pa;
+    struct pmap *kernel_pmap;
     size_t stack_size;
     uintptr_t va;
     void *mem;
-    int error;
+    __unused int error;
 
-    stack_size = vm_page_round(STACK_SIZE);
+    kernel_pmap = pmap_get_kernel_pmap();
+
+    stack_size = vm_page_round(TCB_STACK_SIZE);
     mem = vm_kmem_alloc((PAGE_SIZE * 2) + stack_size);
 
     if (mem == NULL) {
@@ -1929,27 +1925,21 @@ thread_alloc_stack(void)
     pmap_remove(kernel_pmap, va + PAGE_SIZE + stack_size, cpumap_all());
     pmap_update(kernel_pmap);
 
-    vm_page_free(first_page, 0);
-    vm_page_free(last_page, 0);
-
-    return (char *)va + PAGE_SIZE;
+    return (void *)va + PAGE_SIZE;
 }
 
 static void
 thread_free_stack(void *stack)
 {
     size_t stack_size;
-    char *va;
+    void *va;
 
-    stack_size = vm_page_round(STACK_SIZE);
-    va = (char *)stack - PAGE_SIZE;
-
-    vm_kmem_free_va(va, PAGE_SIZE);
-    vm_kmem_free(va + PAGE_SIZE, stack_size);
-    vm_kmem_free_va(va + PAGE_SIZE + stack_size, PAGE_SIZE);
+    stack_size = vm_page_round(TCB_STACK_SIZE);
+    va = (void *)stack - PAGE_SIZE;
+    vm_kmem_free(va, (PAGE_SIZE * 2) + stack_size);
 }
 
-#else /* X15_THREAD_STACK_GUARD */
+#else /* X15_ENABLE_THREAD_STACK_GUARD */
 
 static void *
 thread_alloc_stack(void)
@@ -1963,21 +1953,13 @@ thread_free_stack(void *stack)
     kmem_cache_free(&thread_stack_cache, stack);
 }
 
-#endif /* X15_THREAD_STACK_GUARD */
+#endif /* X15_ENABLE_THREAD_STACK_GUARD */
 
-void
+static void
 thread_destroy(struct thread *thread)
 {
-    struct thread_runq *runq;
-    unsigned long flags, state;
-
     assert(thread != thread_self());
-
-    do {
-        runq = thread_lock_runq(thread, &flags);
-        state = thread->state;
-        thread_unlock_runq(runq, flags);
-    } while (state != THREAD_DEAD);
+    assert(thread->state == THREAD_DEAD);
 
     /* See task_info() */
     task_remove_thread(thread->task, thread);
@@ -1986,72 +1968,46 @@ thread_destroy(struct thread *thread)
     turnstile_destroy(thread->priv_turnstile);
     sleepq_destroy(thread->priv_sleepq);
     thread_free_stack(thread->stack);
+    tcb_cleanup(&thread->tcb);
     kmem_cache_free(&thread_cache, thread);
 }
 
 static void
 thread_join_common(struct thread *thread)
 {
-    assert(thread != thread_self());
+    struct thread_runq *runq;
+    unsigned long flags, state;
+    struct thread *self;
 
-    mutex_lock(&thread->join_lock);
+    self = thread_self();
+    assert(thread != self);
 
-    while (!thread->exited) {
-        condition_wait(&thread->join_cond, &thread->join_lock);
+    spinlock_lock(&thread->join_lock);
+
+    assert(!thread->join_waiter);
+    thread->join_waiter = self;
+
+    while (!thread->terminating) {
+        thread_sleep(&thread->join_lock, thread, "exit");
     }
 
-    mutex_unlock(&thread->join_lock);
+    spinlock_unlock(&thread->join_lock);
 
-    thread_unref(thread);
+    do {
+        runq = thread_lock_runq(thread, &flags);
+        state = thread->state;
+        thread_unlock_runq(runq, flags);
+    } while (state != THREAD_DEAD);
+
+    thread_destroy(thread);
 }
 
-static void
-thread_reap(void *arg)
+void thread_terminate(struct thread *thread)
 {
-    struct thread_zombie *zombie;
-    struct list zombies;
-
-    (void)arg;
-
-    for (;;) {
-        mutex_lock(&thread_reap_lock);
-
-        while (list_empty(&thread_reap_list)) {
-            condition_wait(&thread_reap_cond, &thread_reap_lock);
-        }
-
-        list_set_head(&zombies, &thread_reap_list);
-        list_init(&thread_reap_list);
-
-        mutex_unlock(&thread_reap_lock);
-
-        while (!list_empty(&zombies)) {
-            zombie = list_first_entry(&zombies, struct thread_zombie, node);
-            list_remove(&zombie->node);
-            thread_join_common(zombie->thread);
-        }
-    }
-
-    /* Never reached */
-}
-
-static void __init
-thread_setup_reaper(void)
-{
-    struct thread_attr attr;
-    struct thread *thread;
-    int error;
-
-    mutex_init(&thread_reap_lock);
-    condition_init(&thread_reap_cond);
-    list_init(&thread_reap_list);
-
-    thread_attr_init(&attr, THREAD_KERNEL_PREFIX "thread_reap");
-    error = thread_create(&thread, &attr, thread_reap, NULL);
-
-    if (error) {
-        panic("thread: unable to create reaper thread");
-    }
+    spinlock_lock(&thread->join_lock);
+    thread->terminating = true;
+    thread_wakeup(thread->join_waiter);
+    spinlock_unlock(&thread->join_lock);
 }
 
 static void
@@ -2234,27 +2190,135 @@ thread_setup_runq(struct thread_runq *runq)
     thread_setup_idler(runq);
 }
 
-void __init
+#ifdef X15_ENABLE_SHELL
+
+/*
+ * This function is meant for debugging only. As a result, it uses a weak
+ * locking policy which allows tracing threads which state may mutate during
+ * tracing.
+ */
+static void
+thread_shell_trace(int argc, char *argv[])
+{
+    const char *task_name, *thread_name;
+    struct thread_runq *runq;
+    struct thread *thread;
+    unsigned long flags;
+    struct task *task;
+    int error;
+
+    if (argc != 3) {
+        error = ERROR_INVAL;
+        goto error;
+    }
+
+    task_name = argv[1];
+    thread_name = argv[2];
+
+    task = task_lookup(task_name);
+
+    if (task == NULL) {
+        error = ERROR_SRCH;
+        goto error;
+    }
+
+    thread = task_lookup_thread(task, thread_name);
+    task_unref(task);
+
+    if (thread == NULL) {
+        error = ERROR_SRCH;
+        goto error;
+    }
+
+    runq = thread_lock_runq(thread, &flags);
+
+    if (thread == runq->current) {
+        printf("thread: trace: thread is running\n");
+    } else {
+        tcb_trace(&thread->tcb);
+    }
+
+    thread_unlock_runq(runq, flags);
+
+    thread_unref(thread);
+    return;
+
+error:
+    printf("thread: trace: %s\n", error_str(error));
+}
+
+static struct shell_cmd thread_shell_cmds[] = {
+    SHELL_CMD_INITIALIZER("thread_trace", thread_shell_trace,
+                          "thread_trace <task_name> <thread_name>",
+                          "display the stack trace of a given thread"),
+};
+
+static int __init
+thread_setup_shell(void)
+{
+    SHELL_REGISTER_CMDS(thread_shell_cmds);
+    return 0;
+}
+
+INIT_OP_DEFINE(thread_setup_shell,
+               INIT_OP_DEP(printf_setup, true),
+               INIT_OP_DEP(shell_setup, true),
+               INIT_OP_DEP(task_setup, true),
+               INIT_OP_DEP(thread_setup, true));
+
+#endif /* X15_ENABLE_SHELL */
+
+static void __init
+thread_setup_common(unsigned int cpu)
+{
+    assert(cpu != 0);
+    cpumap_set(&thread_active_runqs, cpu);
+    thread_init_booter(cpu);
+    thread_runq_init(percpu_ptr(thread_runq, cpu), cpu, &thread_booters[cpu]);
+}
+
+static int __init
 thread_setup(void)
 {
     int cpu;
 
     for (cpu = 1; (unsigned int)cpu < cpu_count(); cpu++) {
-        thread_bootstrap_common(cpu);
+        thread_setup_common(cpu);
     }
 
     kmem_cache_init(&thread_cache, "thread", sizeof(struct thread),
                     CPU_L1_SIZE, NULL, 0);
-#ifndef X15_THREAD_STACK_GUARD
-    kmem_cache_init(&thread_stack_cache, "thread_stack", STACK_SIZE,
-                    DATA_ALIGN, NULL, 0);
-#endif /* X15_THREAD_STACK_GUARD */
-
-    thread_setup_reaper();
+#ifndef X15_ENABLE_THREAD_STACK_GUARD
+    kmem_cache_init(&thread_stack_cache, "thread_stack", TCB_STACK_SIZE,
+                    CPU_DATA_ALIGN, NULL, 0);
+#endif /* X15_ENABLE_THREAD_STACK_GUARD */
 
     cpumap_for_each(&thread_active_runqs, cpu) {
         thread_setup_runq(percpu_ptr(thread_runq, cpu));
     }
+
+    return 0;
+}
+
+INIT_OP_DEFINE(thread_setup,
+               INIT_OP_DEP(cpumap_setup, true),
+               INIT_OP_DEP(kmem_setup, true),
+               INIT_OP_DEP(pmap_setup, true),
+               INIT_OP_DEP(sleepq_setup, true),
+               INIT_OP_DEP(task_setup, true),
+               INIT_OP_DEP(thread_bootstrap, true),
+               INIT_OP_DEP(turnstile_setup, true),
+#ifdef X15_ENABLE_THREAD_STACK_GUARD
+               INIT_OP_DEP(vm_kmem_setup, true),
+               INIT_OP_DEP(vm_map_setup, true),
+               INIT_OP_DEP(vm_page_setup, true),
+#endif
+               );
+
+void __init
+thread_ap_setup(void)
+{
+    tcb_set_current(&thread_booters[cpu_id()].tcb);
 }
 
 int
@@ -2312,6 +2376,15 @@ error_thread:
     return error;
 }
 
+static void
+thread_reap(struct work *work)
+{
+    struct thread_zombie *zombie;
+
+    zombie = structof(work, struct thread_zombie, work);
+    thread_join_common(zombie->thread);
+}
+
 void
 thread_exit(void)
 {
@@ -2325,24 +2398,13 @@ thread_exit(void)
     if (thread_test_flag(thread, THREAD_DETACHED)) {
         zombie.thread = thread;
 
-        mutex_lock(&thread_reap_lock);
-        list_insert_tail(&thread_reap_list, &zombie.node);
-        condition_signal(&thread_reap_cond);
-        mutex_unlock(&thread_reap_lock);
+        work_init(&zombie.work, thread_reap);
+        work_schedule(&zombie.work, 0);
     }
 
-    mutex_lock(&thread->join_lock);
-    thread->exited = 1;
-    condition_signal(&thread->join_cond);
-
-    /*
-     * Disable preemption before releasing the mutex to make sure the current
-     * thread becomes dead as soon as possible. This is important because the
-     * joining thread actively polls the thread state before destroying it.
-     */
     thread_preempt_disable();
 
-    mutex_unlock(&thread->join_lock);
+    thread_unref(thread);
 
     runq = thread_runq_local();
     spinlock_lock_intr_save(&runq->lock, &flags);
@@ -2360,16 +2422,95 @@ thread_join(struct thread *thread)
     thread_join_common(thread);
 }
 
-void
-thread_sleep(struct spinlock *interlock, const void *wchan_addr,
-             const char *wchan_desc)
+static int
+thread_wakeup_common(struct thread *thread, int error)
 {
+    struct thread_runq *runq;
+    unsigned long flags;
+
+    if ((thread == NULL) || (thread == thread_self())) {
+        return ERROR_INVAL;
+    }
+
+    /*
+     * There is at most one reference on threads that were never dispatched,
+     * in which case there is no need to lock anything.
+     */
+    if (thread->runq == NULL) {
+        assert(thread->state != THREAD_RUNNING);
+        thread_clear_wchan(thread);
+        thread->state = THREAD_RUNNING;
+    } else {
+        runq = thread_lock_runq(thread, &flags);
+
+        if (thread->state == THREAD_RUNNING) {
+            thread_unlock_runq(runq, flags);
+            return ERROR_INVAL;
+        }
+
+        thread_clear_wchan(thread);
+        thread->state = THREAD_RUNNING;
+        thread_unlock_runq(runq, flags);
+    }
+
+    thread_preempt_disable_intr_save(&flags);
+
+    if (!thread->pinned) {
+        runq = thread_get_real_sched_ops(thread)->select_runq(thread);
+    } else {
+        /*
+         * This access doesn't need to be atomic, as the current thread is
+         * the only one which may update the member.
+         */
+        runq = thread->runq;
+        spinlock_lock(&runq->lock);
+    }
+
+    thread->wakeup_error = error;
+    thread_runq_wakeup(runq, thread);
+    spinlock_unlock(&runq->lock);
+    thread_preempt_enable_intr_restore(flags);
+
+    return 0;
+}
+
+int
+thread_wakeup(struct thread *thread)
+{
+    return thread_wakeup_common(thread, 0);
+}
+
+struct thread_timeout_waiter {
+    struct thread *thread;
+    struct timer timer;
+};
+
+static void
+thread_timeout(struct timer *timer)
+{
+    struct thread_timeout_waiter *waiter;
+
+    waiter = structof(timer, struct thread_timeout_waiter, timer);
+    thread_wakeup_common(waiter->thread, ERROR_TIMEDOUT);
+}
+
+static int
+thread_sleep_common(struct spinlock *interlock, const void *wchan_addr,
+                    const char *wchan_desc, bool timed, uint64_t ticks)
+{
+    struct thread_timeout_waiter waiter;
     struct thread_runq *runq;
     struct thread *thread;
     unsigned long flags;
 
     thread = thread_self();
     assert(thread->preempt == 1);
+
+    if (timed) {
+        waiter.thread = thread;
+        timer_init(&waiter.timer, thread_timeout, TIMER_INTR);
+        timer_schedule(&waiter.timer, ticks);
+    }
 
     runq = thread_runq_local();
     spinlock_lock_intr_save(&runq->lock, &flags);
@@ -2387,54 +2528,49 @@ thread_sleep(struct spinlock *interlock, const void *wchan_addr,
 
     spinlock_unlock_intr_restore(&runq->lock, flags);
 
+    if (timed) {
+        timer_cancel(&waiter.timer);
+    }
+
     if (interlock != NULL) {
         spinlock_lock(interlock);
         thread_preempt_enable_no_resched();
     }
 
     assert(thread->preempt == 1);
+
+    return thread->wakeup_error;
 }
 
 void
-thread_wakeup(struct thread *thread)
+thread_sleep(struct spinlock *interlock, const void *wchan_addr,
+             const char *wchan_desc)
 {
-    struct thread_runq *runq;
-    unsigned long flags;
+    __unused int error;
 
-    /*
-     * There is at most one reference on threads that were never dispatched,
-     * in which case there is no need to lock anything.
-     */
-    if (thread->runq == NULL) {
-        assert(thread->state != THREAD_RUNNING);
-        thread_clear_wchan(thread);
-        thread->state = THREAD_RUNNING;
-    } else {
-        runq = thread_lock_runq(thread, &flags);
+    error = thread_sleep_common(interlock, wchan_addr, wchan_desc, false, 0);
+    assert(!error);
+}
 
-        if (thread->state == THREAD_RUNNING) {
-            thread_unlock_runq(runq, flags);
-            return;
-        }
+int
+thread_timedsleep(struct spinlock *interlock, const void *wchan_addr,
+                  const char *wchan_desc, uint64_t ticks)
+{
+    return thread_sleep_common(interlock, wchan_addr, wchan_desc, true, ticks);
+}
 
-        thread_clear_wchan(thread);
-        thread->state = THREAD_RUNNING;
-        thread_unlock_runq(runq, flags);
-    }
-
+void
+thread_delay(uint64_t ticks, bool absolute)
+{
     thread_preempt_disable();
-    cpu_intr_save(&flags);
 
-    if (!thread->pinned) {
-        runq = thread_get_real_sched_ops(thread)->select_runq(thread);
-    } else {
-        runq = thread->runq;
-        spinlock_lock(&runq->lock);
+    if (!absolute) {
+        /* Add a tick to avoid quantization errors */
+        ticks += clock_get_time() + 1;
     }
 
-    thread_runq_wakeup(runq, thread);
-    spinlock_unlock(&runq->lock);
-    cpu_intr_restore(flags);
+    thread_timedsleep(NULL, thread_self(), "delay", ticks);
+
     thread_preempt_enable();
 }
 
@@ -2484,30 +2620,36 @@ thread_yield(void)
 }
 
 void
+thread_schedule(void)
+{
+    if (likely(!thread_test_flag(thread_self(), THREAD_YIELD))) {
+        return;
+    }
+
+    thread_yield();
+}
+
+void
 thread_schedule_intr(void)
 {
     struct thread_runq *runq;
 
-    thread_assert_interrupted();
+    assert(thread_check_intr_context());
 
     runq = thread_runq_local();
     syscnt_inc(&runq->sc_schedule_intrs);
 }
 
 void
-thread_tick_intr(void)
+thread_report_periodic_event(void)
 {
     const struct thread_sched_ops *ops;
     struct thread_runq *runq;
     struct thread *thread;
 
-    thread_assert_interrupted();
+    assert(thread_check_intr_context());
 
     runq = thread_runq_local();
-    syscnt_inc(&runq->sc_tick_intrs);
-    llsync_report_periodic_event();
-    sref_report_periodic_event();
-    work_report_periodic_event();
     thread = thread_self();
 
     spinlock_lock(&runq->lock);
@@ -2634,14 +2776,14 @@ thread_pi_setscheduler(struct thread *thread, unsigned char policy,
                        unsigned short priority)
 {
     const struct thread_sched_ops *ops;
+    __unused struct turnstile_td *td;
     struct thread_runq *runq;
-    struct turnstile_td *td;
     unsigned int global_priority;
     unsigned long flags;
     bool requeue, current;
 
     td = thread_turnstile_td(thread);
-    turnstile_td_assert_lock(td);
+    assert(turnstile_td_locked(td));
 
     ops = thread_get_sched_ops(thread_policy_to_class(policy));
     global_priority = ops->get_global_priority(priority);
@@ -2723,7 +2865,7 @@ thread_key_create(unsigned int *keyp, thread_dtor_fn_t dtor)
 {
     unsigned int key;
 
-    key = atomic_fetch_add_acq_rel(&thread_nr_keys, 1);
+    key = atomic_fetch_add(&thread_nr_keys, 1, ATOMIC_RELAXED);
 
     if (key >= THREAD_KEYS_MAX) {
         panic("thread: maximum number of keys exceeded");
@@ -2731,4 +2873,15 @@ thread_key_create(unsigned int *keyp, thread_dtor_fn_t dtor)
 
     thread_dtors[key] = dtor;
     *keyp = key;
+}
+
+bool
+thread_is_running(const struct thread *thread)
+{
+    const struct thread_runq *runq;
+
+    runq = atomic_load(&thread->runq, ATOMIC_RELAXED);
+
+    return (runq != NULL)
+           && (atomic_load(&runq->current, ATOMIC_RELAXED) == thread);
 }

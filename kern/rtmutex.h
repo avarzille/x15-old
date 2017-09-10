@@ -24,10 +24,12 @@
 #ifndef _KERN_RTMUTEX_H
 #define _KERN_RTMUTEX_H
 
+#include <assert.h>
 #include <stdint.h>
 
-#include <kern/assert.h>
 #include <kern/error.h>
+#include <kern/init.h>
+#include <kern/macros.h>
 #include <kern/rtmutex_i.h>
 #include <kern/rtmutex_types.h>
 
@@ -56,13 +58,13 @@ rtmutex_trylock(struct rtmutex *rtmutex)
 {
     uintptr_t prev_owner;
 
-    prev_owner = rtmutex_tryacquire(rtmutex);
+    prev_owner = rtmutex_lock_fast(rtmutex);
 
-    if (prev_owner == 0) {
-        return 0;
+    if (unlikely(prev_owner != 0)) {
+        return ERROR_BUSY;
     }
 
-    return ERROR_BUSY;
+    return 0;
 }
 
 /*
@@ -79,13 +81,25 @@ rtmutex_lock(struct rtmutex *rtmutex)
 {
     uintptr_t prev_owner;
 
-    prev_owner = rtmutex_tryacquire(rtmutex);
+    prev_owner = rtmutex_lock_fast(rtmutex);
 
-    if (prev_owner == 0) {
-        return;
+    if (unlikely(prev_owner != 0)) {
+        rtmutex_lock_slow(rtmutex);
+    }
+}
+
+static inline int
+rtmutex_timedlock(struct rtmutex *rtmutex, uint64_t ticks)
+{
+    uintptr_t prev_owner;
+
+    prev_owner = rtmutex_lock_fast(rtmutex);
+
+    if (unlikely(prev_owner != 0)) {
+        return rtmutex_timedlock_slow(rtmutex, ticks);
     }
 
-    rtmutex_lock_slow(rtmutex);
+    return 0;
 }
 
 /*
@@ -99,13 +113,13 @@ rtmutex_unlock(struct rtmutex *rtmutex)
 {
     uintptr_t prev_owner;
 
-    prev_owner = rtmutex_tryrelease(rtmutex);
+    prev_owner = rtmutex_unlock_fast(rtmutex);
 
-    if (!(prev_owner & RTMUTEX_CONTENDED)) {
-        return;
+    if (unlikely(prev_owner & RTMUTEX_CONTENDED)) {
+        rtmutex_unlock_slow(rtmutex);
     }
-
-    rtmutex_unlock_slow(rtmutex);
 }
+
+INIT_OP_DECLARE(rtmutex_setup);
 
 #endif /* _KERN_RTMUTEX_H */

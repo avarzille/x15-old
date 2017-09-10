@@ -18,7 +18,8 @@
 #ifndef _KERN_BITMAP_I_H
 #define _KERN_BITMAP_I_H
 
-#include <kern/limits.h>
+#include <limits.h>
+
 #include <kern/macros.h>
 
 #define BITMAP_LONGS(nr_bits) DIV_CEIL(nr_bits, LONG_BIT)
@@ -29,13 +30,13 @@
  *
  * Implemented as a macro for const-correctness.
  */
-#define bitmap_lookup(bm, bit)          \
+#define bitmap_lookup(bmp, bitp)        \
 MACRO_BEGIN                             \
     int i;                              \
                                         \
-    i = BITMAP_LONGS((bit) + 1) - 1;    \
-    (bm) += i;                          \
-    (bit) -= i * LONG_BIT;              \
+    i = BITMAP_LONGS(*(bitp) + 1) - 1;  \
+    *(bmp) += i;                        \
+    *(bitp) -= i * LONG_BIT;            \
 MACRO_END
 
 static inline unsigned long

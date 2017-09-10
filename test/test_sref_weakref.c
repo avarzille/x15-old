@@ -33,6 +33,7 @@
  */
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include <kern/error.h>
 #include <kern/macros.h>
@@ -71,7 +72,7 @@ test_run(void *arg)
 
         for (j = 0; j < 0x20000000; j++);
 
-        printk("run: iterations: %lu\n", i);
+        printf("run: iterations: %lu\n", i);
         syscnt_info("sref_epoch");
         syscnt_info("sref_dirty_zero");
         syscnt_info("sref_revive");
@@ -95,7 +96,7 @@ test_ref(void *arg)
         }
 
         if ((i % 100000000) == 0) {
-            printk("ref: iterations: %lu\n", i);
+            printf("ref: iterations: %lu\n", i);
         }
     }
 }

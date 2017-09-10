@@ -34,9 +34,6 @@ ASM_ENTRY(cpu_load_gdt)
  movl %eax, %es
  movl %eax, %ss
 
- movl $CPU_GDT_SEL_NULL, %eax
- movl %eax, %gs
-
  /* Alter the stack to reload the code segment using a far return */
 #ifdef __LP64__
  popq %rax

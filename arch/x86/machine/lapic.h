@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2012 Richard Braun.
+ * Copyright (c) 2011-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,6 +18,7 @@
 #ifndef _X86_LAPIC_H
 #define _X86_LAPIC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include <machine/trap.h>

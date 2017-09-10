@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2014 Richard Braun.
+ * Copyright (c) 2010-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,31 @@
 
 #ifndef _X86_CPU_H
 #define _X86_CPU_H
+
+#include <limits.h>
+
+/*
+ * L1 cache line size.
+ *
+ * XXX Use this value until processor selection is available.
+ */
+#define CPU_L1_SIZE 64
+
+/*
+ * Data alignment, normally the word size.
+ */
+#define CPU_DATA_ALIGN (LONG_BIT / 8)
+
+/*
+ * Function alignment.
+ *
+ * Aligning functions improves instruction fetching.
+ *
+ * Used for assembly functions only.
+ *
+ * XXX Use this value until processor selection is available.
+ */
+#define CPU_TEXT_ALIGN 16
 
 /*
  * Processor privilege levels.
@@ -46,7 +71,7 @@
 /*
  * EFLAGS register flags.
  */
-#define CPU_EFL_ONE 0x00000002
+#define CPU_EFL_ONE 0x00000002  /* Reserved, must be one */
 #define CPU_EFL_IF  0x00000200
 
 /*
@@ -54,6 +79,7 @@
  */
 #define CPU_MSR_EFER    0xc0000080
 #define CPU_MSR_FSBASE  0xc0000100
+#define CPU_MSR_GSBASE  0xc0000101
 
 /*
  * EFER MSR flags.
@@ -65,13 +91,13 @@
  *
  * TODO Better names.
  */
-#define CPU_FEATURE2_FPU      0x00000001
-#define CPU_FEATURE2_PSE      0x00000008
-#define CPU_FEATURE2_PAE      0x00000040
-#define CPU_FEATURE2_MSR      0x00000020
-#define CPU_FEATURE2_CAS8B    0x00000100
-#define CPU_FEATURE2_APIC     0x00000200
-#define CPU_FEATURE2_PGE      0x00002000
+#define CPU_FEATURE2_FPU    0x00000001
+#define CPU_FEATURE2_PSE    0x00000008
+#define CPU_FEATURE2_PAE    0x00000040
+#define CPU_FEATURE2_MSR    0x00000020
+#define CPU_FEATURE2_CX8    0x00000100
+#define CPU_FEATURE2_APIC   0x00000200
+#define CPU_FEATURE2_PGE    0x00002000
 
 #define CPU_FEATURE4_1GP    0x04000000
 #define CPU_FEATURE4_LM     0x20000000
@@ -89,19 +115,55 @@
 #else /* __LP64__ */
 #define CPU_GDT_SEL_DF_TSS  32
 #define CPU_GDT_SEL_PERCPU  40
-#define CPU_GDT_SIZE        48
+#define CPU_GDT_SEL_TLS     48
+#define CPU_GDT_SIZE        56
 #endif /* __LP64__ */
 
 #define CPU_IDT_SIZE 256
 
 #ifndef __ASSEMBLER__
 
+#include <stdalign.h>
 #include <stdint.h>
+#include <stdnoreturn.h>
 
+#include <kern/init.h>
 #include <kern/macros.h>
 #include <kern/percpu.h>
 #include <machine/lapic.h>
 #include <machine/pit.h>
+#include <machine/ssp.h>
+
+/*
+ * Gate/segment descriptor bits and masks.
+ */
+#define CPU_DESC_TYPE_DATA              0x00000200
+#define CPU_DESC_TYPE_CODE              0x00000a00
+#define CPU_DESC_TYPE_TSS               0x00000900
+#define CPU_DESC_TYPE_GATE_INTR         0x00000e00
+#define CPU_DESC_TYPE_GATE_TASK         0x00000500
+#define CPU_DESC_S                      0x00001000
+#define CPU_DESC_PRESENT                0x00008000
+#define CPU_DESC_LONG                   0x00200000
+#define CPU_DESC_DB                     0x00400000
+#define CPU_DESC_GRAN_4KB               0x00800000
+
+#define CPU_DESC_GATE_OFFSET_LOW_MASK   0x0000ffff
+#define CPU_DESC_GATE_OFFSET_HIGH_MASK  0xffff0000
+#define CPU_DESC_SEG_IST_MASK           0x00000007
+#define CPU_DESC_SEG_BASE_LOW_MASK      0x0000ffff
+#define CPU_DESC_SEG_BASE_MID_MASK      0x00ff0000
+#define CPU_DESC_SEG_BASE_HIGH_MASK     0xff000000
+#define CPU_DESC_SEG_LIMIT_LOW_MASK     0x0000ffff
+#define CPU_DESC_SEG_LIMIT_HIGH_MASK    0x000f0000
+
+/*
+ * Code or data segment descriptor.
+ */
+struct cpu_seg_desc {
+    uint32_t low;
+    uint32_t high;
+};
 
 /*
  * Forward declaration.
@@ -179,7 +241,7 @@ struct cpu {
     unsigned int features4;
     unsigned short phys_addr_width;
     unsigned short virt_addr_width;
-    char gdt[CPU_GDT_SIZE] __aligned(8);
+    alignas(8) char gdt[CPU_GDT_SIZE];
     struct cpu_tss tss;
 #ifndef __LP64__
     struct cpu_tss double_fault_tss;
@@ -187,6 +249,11 @@ struct cpu {
     volatile int state;
     void *boot_stack;
     void *double_fault_stack;
+};
+
+struct cpu_tls_seg {
+    uintptr_t unused[SSP_WORD_TLS_OFFSET];
+    uintptr_t ssp_guard_word;
 };
 
 /*
@@ -334,7 +401,7 @@ cpu_idle(void)
  *
  * Implies a compiler barrier.
  */
-static __noreturn __always_inline void
+noreturn static __always_inline void
 cpu_halt(void)
 {
     cpu_intr_disable();
@@ -479,6 +546,15 @@ cpu_set_msr(uint32_t msr, uint32_t high, uint32_t low)
     asm volatile("wrmsr" : : "c" (msr), "a" (low), "d" (high));
 }
 
+static __always_inline uint64_t
+cpu_get_tsc(void)
+{
+    uint32_t high, low;
+
+    asm volatile("rdtsc" : "=a" (low), "=d" (high));
+    return ((uint64_t)high << 32) | low;
+}
+
 /*
  * Flush non-global TLB entries.
  *
@@ -528,13 +604,9 @@ cpu_tlb_flush_va(unsigned long va)
 }
 
 /*
- * XXX For now, directly use the PIT.
+ * Busy-wait for a given amount of time, in microseconds.
  */
-static inline void
-cpu_delay(unsigned long usecs)
-{
-    pit_delay(usecs);
-}
+void cpu_delay(unsigned long usecs);
 
 /*
  * Return the address of the boot stack allocated for the current processor.
@@ -543,36 +615,21 @@ void * cpu_get_boot_stack(void);
 
 /*
  * Install an interrupt handler in the IDT.
+ *
+ * These functions may be called before the cpu module is initialized.
  */
 void cpu_idt_set_gate(unsigned int vector, void (*isr)(void));
 void cpu_idt_set_double_fault(void (*isr)(void));
 
 /*
- * Set up the cpu module.
+ * Log processor information.
  */
-void cpu_setup(void);
-
-/*
- * Make sure the CPU has some required features.
- */
-void cpu_check(const struct cpu *cpu);
-
-/*
- * Display processor information.
- */
-void cpu_info(const struct cpu *cpu);
+void cpu_log_info(const struct cpu *cpu);
 
 /*
  * Register the presence of a local APIC.
  */
 void cpu_mp_register_lapic(unsigned int apic_id, int is_bsp);
-
-/*
- * Probe application processors.
- *
- * On return, cpu_count() gives the actual number of managed processors.
- */
-void cpu_mp_probe(void);
 
 /*
  * Start application processors.
@@ -591,13 +648,19 @@ void cpu_mp_setup(void);
  */
 void cpu_ap_setup(void);
 
+static inline unsigned int
+cpu_apic_id(unsigned int cpu)
+{
+    return cpu_from_id(cpu)->apic_id;
+}
+
 /*
  * Send a cross-call interrupt to a remote processor.
  */
 static inline void
 cpu_send_xcall(unsigned int cpu)
 {
-    lapic_ipi_send(cpu_from_id(cpu)->apic_id, TRAP_XCALL);
+    lapic_ipi_send(cpu_apic_id(cpu), TRAP_XCALL);
 }
 
 /*
@@ -611,13 +674,33 @@ void cpu_xcall_intr(struct trap_frame *frame);
 static inline void
 cpu_send_thread_schedule(unsigned int cpu)
 {
-    lapic_ipi_send(cpu_from_id(cpu)->apic_id, TRAP_THREAD_SCHEDULE);
+    lapic_ipi_send(cpu_apic_id(cpu), TRAP_THREAD_SCHEDULE);
 }
 
 /*
  * Interrupt handler for scheduling requests.
  */
 void cpu_thread_schedule_intr(struct trap_frame *frame);
+
+/*
+ * This init operation provides :
+ *  - initialization of the BSP structure.
+ *  - cpu_delay()
+ *  - cpu_local_ptr() and cpu_local_var()
+ */
+INIT_OP_DECLARE(cpu_setup);
+
+/*
+ * This init operation provides :
+ *  - cpu_count()
+ */
+INIT_OP_DECLARE(cpu_mp_probe);
+
+/*
+ * This init operation provides :
+ *  - cpu shutdown operations registered
+ */
+INIT_OP_DECLARE(cpu_setup_shutdown);
 
 #endif /* __ASSEMBLER__ */
 

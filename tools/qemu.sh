@@ -1,10 +1,12 @@
 #!/bin/sh
 
 # Amount of physical memory
-RAM=8192
+RAM=1024
 
-# Number of processors
-NR_CPUS=8
+# Number of processors. Keep this below the number of physical processors
+# because the kernel doesn't replace spinning with sleeping from within
+# a virtual machine, which causes performance to collapse.
+NR_CPUS=4
 
 # QEMU system emulator
 QEMU_EXE=qemu-system-i386
@@ -28,7 +30,7 @@ cat > $CDROOT/boot/grub/grub.cfg << EOF
 set timeout=1
 
 menuentry "X15" --class os {
-	multiboot	(hd96)/boot/x15 root=device:hd1s8
+        multiboot (hd96)/boot/x15 root=device:hd1s8
 }
 EOF
 grub-mkrescue -o $TMPDIR/grub.iso $CDROOT

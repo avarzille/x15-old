@@ -15,29 +15,38 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
+#include <stdalign.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#include <kern/assert.h>
 #include <kern/init.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/panic.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
-#include <kern/printk.h>
+#include <kern/shutdown.h>
 #include <kern/thread.h>
 #include <kern/xcall.h>
-#include <machine/acpimp.h>
+#include <machine/acpi.h>
 #include <machine/biosmem.h>
 #include <machine/boot.h>
 #include <machine/cpu.h>
 #include <machine/io.h>
 #include <machine/lapic.h>
-#include <machine/mb.h>
+#include <machine/page.h>
+#include <machine/pic.h>
+#include <machine/pit.h>
 #include <machine/pmap.h>
+#include <machine/ssp.h>
 #include <machine/trap.h>
 #include <vm/vm_page.h>
+
+/*
+ * Delay used for frequency measurement, in microseconds.
+ */
+#define CPU_FREQ_CAL_DELAY  1000000
 
 #define CPU_TYPE_MASK       0x00003000
 #define CPU_TYPE_SHIFT      12
@@ -70,27 +79,11 @@
 #define CPU_MP_CMOS_RESET_VECTOR    0x467
 
 /*
- * Gate/segment descriptor bits and masks.
+ * Priority of the shutdown operations.
+ *
+ * Last resort, lower than everything else.
  */
-#define CPU_DESC_TYPE_DATA              0x00000200
-#define CPU_DESC_TYPE_CODE              0x00000a00
-#define CPU_DESC_TYPE_TSS               0x00000900
-#define CPU_DESC_TYPE_GATE_INTR         0x00000e00
-#define CPU_DESC_TYPE_GATE_TASK         0x00000500
-#define CPU_DESC_S                      0x00001000
-#define CPU_DESC_PRESENT                0x00008000
-#define CPU_DESC_LONG                   0x00200000
-#define CPU_DESC_DB                     0x00400000
-#define CPU_DESC_GRAN_4KB               0x00800000
-
-#define CPU_DESC_GATE_OFFSET_LOW_MASK   0x0000ffff
-#define CPU_DESC_GATE_OFFSET_HIGH_MASK  0xffff0000
-#define CPU_DESC_SEG_IST_MASK           0x00000007
-#define CPU_DESC_SEG_BASE_LOW_MASK      0x0000ffff
-#define CPU_DESC_SEG_BASE_MID_MASK      0x00ff0000
-#define CPU_DESC_SEG_BASE_HIGH_MASK     0xff000000
-#define CPU_DESC_SEG_LIMIT_LOW_MASK     0x0000ffff
-#define CPU_DESC_SEG_LIMIT_HIGH_MASK    0x000f0000
+#define CPU_SHUTDOWN_PRIORITY 0
 
 /*
  * Gate descriptor.
@@ -102,14 +95,6 @@ struct cpu_gate_desc {
     uint32_t word3;
     uint32_t word4;
 #endif /* __LP64__ */
-};
-
-/*
- * Code or data segment descriptor.
- */
-struct cpu_seg_desc {
-    uint32_t low;
-    uint32_t high;
 };
 
 /*
@@ -126,7 +111,7 @@ struct cpu_sysseg_desc {
 
 struct cpu_pseudo_desc {
     uint16_t limit;
-    unsigned long address;
+    uintptr_t address;
 } __packed;
 
 void *cpu_local_area __percpu;
@@ -139,12 +124,27 @@ struct cpu cpu_desc __percpu;
 /*
  * Number of active processors.
  */
-unsigned int cpu_nr_active __read_mostly;
+unsigned int cpu_nr_active __read_mostly = 1;
+
+/*
+ * Processor frequency, assumed fixed and equal on all processors.
+ */
+static uint64_t cpu_freq __read_mostly;
+
+/*
+ * TLS segment, as expected by the compiler.
+ *
+ * TLS isn't actually used inside the kernel. The current purpose of this
+ * segment is to implement stack protection.
+ */
+static const struct cpu_tls_seg cpu_tls_seg = {
+    .ssp_guard_word = SSP_GUARD_WORD,
+};
 
 /*
  * Interrupt descriptor table.
  */
-static struct cpu_gate_desc cpu_idt[CPU_IDT_SIZE] __aligned(8) __read_mostly;
+static alignas(8) struct cpu_gate_desc cpu_idt[CPU_IDT_SIZE] __read_mostly;
 
 /*
  * Double fault handler, and stack for the main processor.
@@ -153,7 +153,25 @@ static struct cpu_gate_desc cpu_idt[CPU_IDT_SIZE] __aligned(8) __read_mostly;
  * memory.
  */
 static unsigned long cpu_double_fault_handler;
-static char cpu_double_fault_stack[STACK_SIZE] __aligned(DATA_ALIGN);
+static alignas(CPU_DATA_ALIGN) char cpu_double_fault_stack[TRAP_STACK_SIZE];
+
+void
+cpu_delay(unsigned long usecs)
+{
+    int64_t total, prev, count, diff;
+
+    assert(usecs != 0);
+
+    total = DIV_CEIL((int64_t)usecs * cpu_freq, 1000000);
+    prev = cpu_get_tsc();
+
+    do {
+        count = cpu_get_tsc();
+        diff = count - prev;
+        prev = count;
+        total -= diff;
+    } while (total > 0);
+}
 
 void * __init
 cpu_get_boot_stack(void)
@@ -249,9 +267,10 @@ cpu_seg_set_tss(char *table, unsigned int selector, struct cpu_tss *tss)
 /*
  * Set the given GDT for the current processor.
  *
- * On i386, the ds, es and ss segment registers are reloaded. In any case,
- * the gs segment register is set to the null selector. The fs segment
- * register, which points to the percpu area, must be set separately.
+ * On i386, the ds, es and ss segment registers are reloaded.
+ *
+ * The fs and gs segment registers, which point to the percpu and the TLS
+ * areas respectively, must be set separately.
  */
 void cpu_load_gdt(struct cpu_pseudo_desc *gdtr);
 
@@ -268,6 +287,19 @@ cpu_set_percpu_area(const struct cpu *cpu, void *area)
 #endif /* __LP64__ */
 
     percpu_var(cpu_local_area, cpu->id) = area;
+}
+
+static inline void __init
+cpu_set_tls_area(void)
+{
+#ifdef __LP64__
+    unsigned long va;
+
+    va = (unsigned long)&cpu_tls_seg;
+    cpu_set_msr(CPU_MSR_GSBASE, (uint32_t)(va >> 32), (uint32_t)va);
+#else /* __LP64__ */
+    asm volatile("mov %0, %%gs" : : "r" (CPU_GDT_SEL_TLS));
+#endif /* __LP64__ */
 }
 
 static void __init
@@ -293,11 +325,13 @@ cpu_init_gdt(struct cpu *cpu)
 #ifndef __LP64__
     cpu_seg_set_tss(cpu->gdt, CPU_GDT_SEL_DF_TSS, &cpu->double_fault_tss);
     cpu_seg_set_data(cpu->gdt, CPU_GDT_SEL_PERCPU, (unsigned long)pcpu_area);
+    cpu_seg_set_data(cpu->gdt, CPU_GDT_SEL_TLS, (unsigned long)&cpu_tls_seg);
 #endif /* __LP64__ */
 
     cpu_init_gdtr(&gdtr, cpu);
     cpu_load_gdt(&gdtr);
     cpu_set_percpu_area(cpu, pcpu_area);
+    cpu_set_tls_area();
 }
 
 static void __init
@@ -317,7 +351,7 @@ cpu_init_tss(struct cpu *cpu)
 #ifdef __LP64__
     assert(cpu->double_fault_stack != NULL);
     tss->ist[CPU_TSS_IST_DF] = (unsigned long)cpu->double_fault_stack
-                               + STACK_SIZE;
+                               + TRAP_STACK_SIZE;
 #endif /* __LP64__ */
 
     asm volatile("ltr %w0" : : "q" (CPU_GDT_SEL_TSS));
@@ -337,7 +371,7 @@ cpu_init_double_fault_tss(struct cpu *cpu)
     tss->cr3 = cpu_get_cr3();
     tss->eip = cpu_double_fault_handler;
     tss->eflags = CPU_EFL_ONE;
-    tss->ebp = (unsigned long)cpu->double_fault_stack + STACK_SIZE;
+    tss->ebp = (unsigned long)cpu->double_fault_stack + TRAP_STACK_SIZE;
     tss->esp = tss->ebp;
     tss->es = CPU_GDT_SEL_DATA;
     tss->cs = CPU_GDT_SEL_CODE;
@@ -387,12 +421,12 @@ cpu_idt_set_double_fault(void (*isr)(void))
 }
 
 static void
-cpu_load_idt(void)
+cpu_load_idt(const void *idt, size_t size)
 {
-    static volatile struct cpu_pseudo_desc idtr;
+    struct cpu_pseudo_desc idtr;
 
-    idtr.address = (unsigned long)cpu_idt;
-    idtr.limit = sizeof(cpu_idt) - 1;
+    idtr.address = (uintptr_t)idt;
+    idtr.limit = size - 1;
     asm volatile("lidt %0" : : "m" (idtr));
 }
 
@@ -417,7 +451,7 @@ cpu_init(struct cpu *cpu)
 #ifndef __LP64__
     cpu_init_double_fault_tss(cpu);
 #endif /* __LP64__ */
-    cpu_load_idt();
+    cpu_load_idt(cpu_idt, sizeof(cpu_idt));
 
     eax = 0;
     cpu_cpuid(&eax, &ebx, &ecx, &edx);
@@ -432,7 +466,9 @@ cpu_init(struct cpu *cpu)
     cpu->phys_addr_width = 0;
     cpu->virt_addr_width = 0;
 
-    assert(max_basic >= 1);
+    if (max_basic == 0) {
+        panic("cpu: unsupported maximum input value for basic information");
+    }
 
     eax = 1;
     cpu_cpuid(&eax, &ebx, &ecx, &edx);
@@ -509,7 +545,21 @@ cpu_init(struct cpu *cpu)
     cpu->state = CPU_STATE_ON;
 }
 
-void __init
+static void __init
+cpu_measure_freq(void)
+{
+    uint64_t start, end;
+
+    pit_setup_free_running();
+
+    start = cpu_get_tsc();
+    pit_delay(CPU_FREQ_CAL_DELAY);
+    end = cpu_get_tsc();
+
+    cpu_freq = (end - start) / (1000000 / CPU_FREQ_CAL_DELAY);
+}
+
+static int __init
 cpu_setup(void)
 {
     struct cpu *cpu;
@@ -518,8 +568,15 @@ cpu_setup(void)
     cpu_preinit(cpu, 0, CPU_INVALID_APIC_ID);
     cpu->double_fault_stack = cpu_double_fault_stack; /* XXX */
     cpu_init(cpu);
-    cpu_nr_active = 1;
+
+    cpu_measure_freq();
+
+    return 0;
 }
+
+INIT_OP_DEFINE(cpu_setup,
+               INIT_OP_DEP(percpu_bootstrap, true),
+               INIT_OP_DEP(trap_setup, true));
 
 static void __init
 cpu_panic_on_missing_feature(const char *feature)
@@ -527,40 +584,56 @@ cpu_panic_on_missing_feature(const char *feature)
     panic("cpu: %s feature missing", feature);
 }
 
-void __init
+static void __init
 cpu_check(const struct cpu *cpu)
 {
     if (!(cpu->features2 & CPU_FEATURE2_FPU)) {
         cpu_panic_on_missing_feature("fpu");
     }
 
-    /* TODO: support UP with legacy PIC machines */
-    if (!(cpu->features2 & CPU_FEATURE2_APIC)) {
-        cpu_panic_on_missing_feature("apic");
-    }
-
-#ifndef __LP64__
-    if (!(cpu->features2 & CPU_FEATURE2_CAS8B)) {
-        cpu_panic_on_missing_feature("cmpxchg8b");
+    /*
+     * The compiler is expected to produce cmpxchg8b instructions to
+     * perform 64-bits atomic operations on a 32-bits processor. Clang
+     * currently has trouble doing that so 64-bits atomic support is
+     * just disabled when building with it.
+     */
+#if !defined(__LP64__) && !defined(__clang__)
+    if (!(cpu->features2 & CPU_FEATURE2_CX8)) {
+        cpu_panic_on_missing_feature("cx8");
     }
 #endif
 }
 
-void
-cpu_info(const struct cpu *cpu)
+static int __init
+cpu_check_bsp(void)
 {
-    printk("cpu%u: %s, type %u, family %u, model %u, stepping %u\n",
-           cpu->id, cpu->vendor_id, cpu->type, cpu->family, cpu->model,
-           cpu->stepping);
+    cpu_check(cpu_current());
+    return 0;
+}
+
+INIT_OP_DEFINE(cpu_check_bsp,
+               INIT_OP_DEP(cpu_setup, true),
+               INIT_OP_DEP(panic_setup, true));
+
+void
+cpu_log_info(const struct cpu *cpu)
+{
+    log_info("cpu%u: %s, type %u, family %u, model %u, stepping %u",
+             cpu->id, cpu->vendor_id, cpu->type, cpu->family, cpu->model,
+             cpu->stepping);
 
     if (strlen(cpu->model_name) > 0) {
-        printk("cpu%u: %s\n", cpu->id, cpu->model_name);
+        log_info("cpu%u: %s", cpu->id, cpu->model_name);
     }
 
     if ((cpu->phys_addr_width != 0) && (cpu->virt_addr_width != 0)) {
-        printk("cpu%u: address widths: physical: %hu, virtual: %hu\n",
-               cpu->id, cpu->phys_addr_width, cpu->virt_addr_width);
+        log_info("cpu%u: address widths: physical: %hu, virtual: %hu",
+                 cpu->id, cpu->phys_addr_width, cpu->virt_addr_width);
     }
+
+    log_info("cpu%u: frequency: %llu.%02llu MHz", cpu->id,
+             (unsigned long long)cpu_freq / 1000000,
+             (unsigned long long)cpu_freq % 1000000);
 }
 
 void __init
@@ -591,20 +664,42 @@ cpu_mp_register_lapic(unsigned int apic_id, int is_bsp)
     cpu_nr_active++;
 }
 
-void __init
+static void
+cpu_shutdown_reset(void)
+{
+    cpu_load_idt(NULL, 1);
+    trap_trigger_double_fault();
+}
+
+static struct shutdown_ops cpu_shutdown_ops = {
+    .reset = cpu_shutdown_reset,
+};
+
+static int __init
 cpu_mp_probe(void)
 {
-    int error;
+    log_info("cpu: %u processor(s) configured", cpu_count());
+    return 0;
+}
 
-    error = acpimp_setup();
+INIT_OP_DEFINE(cpu_mp_probe,
+               INIT_OP_DEP(acpi_setup, true),
+               INIT_OP_DEP(cpu_setup, true),
+               INIT_OP_DEP(log_setup, true));
 
-    /* TODO Support UP with legacy PIC */
-    if (error) {
-        panic("cpu: ACPI required to initialize local APIC");
+static int __init
+cpu_setup_shutdown(void)
+{
+    if (cpu_count() == 1) {
+        shutdown_register(&cpu_shutdown_ops, CPU_SHUTDOWN_PRIORITY);
     }
 
-    printk("cpu: %u processor(s) configured\n", cpu_count());
+    return 0;
 }
+
+INIT_OP_DEFINE(cpu_setup_shutdown,
+               INIT_OP_DEP(cpu_mp_probe, true),
+               INIT_OP_DEP(shutdown_bootstrap, true));
 
 void __init
 cpu_mp_setup(void)
@@ -637,18 +732,20 @@ cpu_mp_setup(void)
     io_write_byte(CPU_MP_CMOS_PORT_REG, CPU_MP_CMOS_REG_RESET);
     io_write_byte(CPU_MP_CMOS_PORT_DATA, CPU_MP_CMOS_DATA_RESET_WARM);
 
+    /* TODO Allocate stacks out of the slab allocator for sub-page sizes */
+
     for (i = 1; i < cpu_count(); i++) {
         cpu = percpu_ptr(cpu_desc, i);
-        page = vm_page_alloc(vm_page_order(STACK_SIZE), VM_PAGE_SEL_DIRECTMAP,
-                             VM_PAGE_KERNEL);
+        page = vm_page_alloc(vm_page_order(BOOT_STACK_SIZE),
+                             VM_PAGE_SEL_DIRECTMAP, VM_PAGE_KERNEL);
 
         if (page == NULL) {
             panic("cpu: unable to allocate boot stack for cpu%u", i);
         }
 
         cpu->boot_stack = vm_page_direct_ptr(page);
-        page = vm_page_alloc(vm_page_order(STACK_SIZE), VM_PAGE_SEL_DIRECTMAP,
-                             VM_PAGE_KERNEL);
+        page = vm_page_alloc(vm_page_order(TRAP_STACK_SIZE),
+                             VM_PAGE_SEL_DIRECTMAP, VM_PAGE_KERNEL);
 
         if (page == NULL) {
             panic("cpu: unable to allocate double fault stack for cpu%u", i);

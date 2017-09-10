@@ -16,17 +16,18 @@
  */
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <kern/error.h>
 #include <kern/init.h>
 #include <kern/kmem.h>
 #include <kern/list.h>
-#include <kern/param.h>
+#include <kern/macros.h>
+#include <kern/shell.h>
 #include <kern/spinlock.h>
 #include <kern/task.h>
 #include <kern/thread.h>
-#include <vm/vm_kmem.h>
 #include <vm/vm_map.h>
 
 #ifdef __LP64__
@@ -35,11 +36,7 @@
 #define TASK_INFO_ADDR_FMT "%08lx"
 #endif /* __LP64__ */
 
-/*
- * Kernel task and storage.
- */
-static struct task kernel_task_store;
-struct task *kernel_task __read_mostly = &kernel_task_store;
+struct task task_kernel_task;
 
 /*
  * Cache for allocated tasks.
@@ -55,21 +52,81 @@ static struct spinlock task_list_lock;
 static void
 task_init(struct task *task, const char *name, struct vm_map *map)
 {
+    task->nr_refs = 1;
     spinlock_init(&task->lock);
     list_init(&task->threads);
     task->map = map;
     strlcpy(task->name, name, sizeof(task->name));
 }
 
-void __init
+#ifdef X15_ENABLE_SHELL
+
+static void
+task_shell_info(int argc, char *argv[])
+{
+    struct task *task;
+    int error;
+
+    if (argc == 1) {
+        task_info(NULL);
+        return;
+    } else {
+        task = task_lookup(argv[1]);
+
+        if (task == NULL) {
+            error = ERROR_INVAL;
+            goto error;
+        }
+
+        task_info(task);
+        task_unref(task);
+    }
+
+    return;
+
+error:
+    printf("task: info: %s\n", error_str(error));
+}
+
+static struct shell_cmd task_shell_cmds[] = {
+    SHELL_CMD_INITIALIZER("task_info", task_shell_info,
+                          "task_info [<task_name>]",
+                          "display tasks and threads"),
+};
+
+static int __init
+task_setup_shell(void)
+{
+    SHELL_REGISTER_CMDS(task_shell_cmds);
+    return 0;
+}
+
+INIT_OP_DEFINE(task_setup_shell,
+               INIT_OP_DEP(printf_setup, true),
+               INIT_OP_DEP(shell_setup, true),
+               INIT_OP_DEP(task_setup, true),
+               INIT_OP_DEP(thread_setup, true));
+
+#endif /* X15_ENABLE_SHELL */
+
+static int __init
 task_setup(void)
 {
+    struct task *kernel_task;
+
+    kernel_task = task_get_kernel_task();
     kmem_cache_init(&task_cache, "task", sizeof(struct task), 0, NULL, 0);
     list_init(&task_list);
     spinlock_init(&task_list_lock);
-    task_init(kernel_task, "x15", kernel_map);
+    task_init(kernel_task, "x15", vm_map_get_kernel_map());
     list_insert_head(&task_list, &kernel_task->node);
+    return 0;
 }
+
+INIT_OP_DEFINE(task_setup,
+               INIT_OP_DEP(kmem_setup, true),
+               INIT_OP_DEP(spinlock_setup, true),
+               INIT_OP_DEP(vm_map_setup, true));
 
 int
 task_create(struct task **taskp, const char *name)
@@ -106,6 +163,31 @@ error_task:
     return error;
 }
 
+struct task *
+task_lookup(const char *name)
+{
+    struct task *task;
+
+    spinlock_lock(&task_list_lock);
+
+    list_for_each_entry(&task_list, task, node) {
+        spinlock_lock(&task->lock);
+
+        if (strcmp(task->name, name) == 0) {
+            task_ref(task);
+            spinlock_unlock(&task->lock);
+            spinlock_unlock(&task_list_lock);
+            return task;
+        }
+
+        spinlock_unlock(&task->lock);
+    }
+
+    spinlock_unlock(&task_list_lock);
+
+    return NULL;
+}
+
 void
 task_add_thread(struct task *task, struct thread *thread)
 {
@@ -122,6 +204,26 @@ task_remove_thread(struct task *task, struct thread *thread)
     spinlock_unlock(&task->lock);
 }
 
+struct thread *
+task_lookup_thread(struct task *task, const char *name)
+{
+    struct thread *thread;
+
+    spinlock_lock(&task->lock);
+
+    list_for_each_entry(&task->threads, thread, task_node) {
+        if (strcmp(thread->name, name) == 0) {
+            thread_ref(thread);
+            spinlock_unlock(&task->lock);
+            return thread;
+        }
+    }
+
+    spinlock_unlock(&task->lock);
+
+    return NULL;
+}
+
 void
 task_info(struct task *task)
 {
@@ -131,7 +233,7 @@ task_info(struct task *task)
         spinlock_lock(&task_list_lock);
 
         list_for_each_entry(&task_list, task, node) {
-            printk("task: %s\n", task->name);
+            task_info(task);
         }
 
         spinlock_unlock(&task_list_lock);
@@ -141,16 +243,18 @@ task_info(struct task *task)
 
     spinlock_lock(&task->lock);
 
-    printk("task: name: %s, threads:\n", task->name);
+    printf("task: name: %s, threads:\n", task->name);
 
     /*
      * Don't grab any lock when accessing threads, so that the function
      * can be used to debug in the middle of most critical sections.
      * Threads are only destroyed after being removed from their task
      * so holding the task lock is enough to guarantee existence.
+     *
+     * TODO Handle tasks and threads names modifications.
      */
     list_for_each_entry(&task->threads, thread, task_node) {
-        printk(TASK_INFO_ADDR_FMT " %c %8s:" TASK_INFO_ADDR_FMT
+        printf(TASK_INFO_ADDR_FMT " %c %8s:" TASK_INFO_ADDR_FMT
                " %.2s:%02hu %02u %s\n",
                (unsigned long)thread,
                thread_state_to_chr(thread),

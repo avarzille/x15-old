@@ -29,7 +29,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef uint32_t rdxtree_key_t;
+#include <kern/init.h>
+#include <kern/llsync.h>
+
+typedef uint64_t rdxtree_key_t;
 
 /*
  * Radix tree initialization flags.
@@ -154,6 +157,12 @@ rdxtree_lookup_slot(const struct rdxtree *tree, rdxtree_key_t key)
     return rdxtree_lookup_common(tree, key, 1);
 }
 
+static inline void *
+rdxtree_load_slot(void **slot)
+{
+    return llsync_load_ptr(*slot);
+}
+
 /*
  * Replace a pointer in a tree.
  *
@@ -192,8 +201,9 @@ rdxtree_iter_key(const struct rdxtree_iter *iter)
 void rdxtree_remove_all(struct rdxtree *tree);
 
 /*
- * Initialize the rdxtree module.
+ * This init operation provides :
+ *  - module fully initialized
  */
-void rdxtree_setup(void);
+INIT_OP_DECLARE(rdxtree_setup);
 
 #endif /* _KERN_RDXTREE_H */

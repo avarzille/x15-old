@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 Richard Braun.
+ * Copyright (c) 2012-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,9 +21,10 @@
 #include <stddef.h>
 #include <string.h>
 
-#include <kern/param.h>
+#include <kern/macros.h>
+#include <machine/string.h>
 
-#ifndef ARCH_STRING_MEMCPY
+#ifndef STRING_ARCH_MEMCPY
 void *
 memcpy(void *dest, const void *src, size_t n)
 {
@@ -35,14 +36,16 @@ memcpy(void *dest, const void *src, size_t n)
     src_ptr = src;
 
     for (i = 0; i < n; i++) {
-        *dest_ptr++ = *src_ptr++;
+        *dest_ptr = *src_ptr;
+        dest_ptr++;
+        src_ptr++;
     }
 
     return dest;
 }
-#endif /* ARCH_STRING_MEMCPY */
+#endif /* STRING_ARCH_MEMCPY */
 
-#ifndef ARCH_STRING_MEMMOVE
+#ifndef STRING_ARCH_MEMMOVE
 void *
 memmove(void *dest, const void *src, size_t n)
 {
@@ -55,22 +58,26 @@ memmove(void *dest, const void *src, size_t n)
         src_ptr = src;
 
         for (i = 0; i < n; i++) {
-            *dest_ptr++ = *src_ptr++;
+            *dest_ptr = *src_ptr;
+            dest_ptr++;
+            src_ptr++;
         }
     } else {
         dest_ptr = dest + n - 1;
         src_ptr = src + n - 1;
 
         for (i = 0; i < n; i++) {
-            *dest_ptr-- = *src_ptr--;
+            *dest_ptr = *src_ptr;
+            dest_ptr--;
+            src_ptr--;
         }
     }
 
     return dest;
 }
-#endif /* ARCH_STRING_MEMMOVE */
+#endif /* STRING_ARCH_MEMMOVE */
 
-#ifndef ARCH_STRING_MEMSET
+#ifndef STRING_ARCH_MEMSET
 void *
 memset(void *s, int c, size_t n)
 {
@@ -85,9 +92,9 @@ memset(void *s, int c, size_t n)
 
     return s;
 }
-#endif /* ARCH_STRING_MEMSET */
+#endif /* STRING_ARCH_MEMSET */
 
-#ifndef ARCH_STRING_MEMCMP
+#ifndef STRING_ARCH_MEMCMP
 int
 memcmp(const void *s1, const void *s2, size_t n)
 {
@@ -97,32 +104,33 @@ memcmp(const void *s1, const void *s2, size_t n)
     a1 = s1;
     a2 = s2;
 
-    for (i = 0; i < n; i++)
+    for (i = 0; i < n; i++) {
         if (a1[i] != a2[i]) {
             return (int)a1[i] - (int)a2[i];
         }
+    }
 
     return 0;
 }
-#endif /* ARCH_STRING_MEMCMP */
+#endif /* STRING_ARCH_MEMCMP */
 
-#ifndef ARCH_STRING_STRLEN
+#ifndef STRING_ARCH_STRLEN
 size_t
 strlen(const char *s)
 {
-    size_t i;
+    const char *start;
 
-    i = 0;
+    start = s;
 
-    while (*s++ != '\0') {
-        i++;
+    while (*s != '\0') {
+        s++;
     }
 
-    return i;
+    return (s - start);
 }
-#endif /* ARCH_STRING_STRLEN */
+#endif /* STRING_ARCH_STRLEN */
 
-#ifndef ARCH_STRING_STRCPY
+#ifndef STRING_ARCH_STRCPY
 char *
 strcpy(char *dest, const char *src)
 {
@@ -137,7 +145,7 @@ strcpy(char *dest, const char *src)
 
     return tmp;
 }
-#endif /* ARCH_STRING_STRCPY */
+#endif /* STRING_ARCH_STRCPY */
 
 size_t
 strlcpy(char *dest, const char *src, size_t n)
@@ -158,7 +166,7 @@ out:
     return len;
 }
 
-#ifndef ARCH_STRING_STRCMP
+#ifndef STRING_ARCH_STRCMP
 int
 strcmp(const char *s1, const char *s2)
 {
@@ -175,4 +183,44 @@ strcmp(const char *s1, const char *s2)
 
     return (int)c1 - (int)c2;
 }
-#endif /* ARCH_STRING_STRCMP */
+#endif /* STRING_ARCH_STRCMP */
+
+#ifndef STRING_ARCH_STRNCMP
+int
+strncmp(const char *s1, const char *s2, size_t n)
+{
+    char c1, c2;
+
+    if (unlikely(n == 0)) {
+        return 0;
+    }
+
+    while ((n != 0) && (c1 = *s1) == (c2 = *s2)) {
+        if (c1 == '\0') {
+            return 0;
+        }
+
+        n--;
+        s1++;
+        s2++;
+    }
+
+    return (int)c1 - (int)c2;
+}
+#endif /* STRING_ARCH_STRNCMP */
+
+#ifndef STRING_ARCH_STRCHR
+char *
+strchr(const char *s, int c)
+{
+    for (;;) {
+        if (*s == c) {
+            return (char *)s;
+        } else if (*s == '\0') {
+            return NULL;
+        }
+
+        s++;
+    }
+}
+#endif /* STRING_ARCH_STRCHR */

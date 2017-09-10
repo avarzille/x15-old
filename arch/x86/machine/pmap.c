@@ -18,29 +18,31 @@
  * TODO Review locking.
  */
 
+#include <assert.h>
+#include <stdalign.h>
 #include <stddef.h>
 #include <string.h>
 
-#include <kern/assert.h>
 #include <kern/cpumap.h>
 #include <kern/error.h>
 #include <kern/init.h>
 #include <kern/kmem.h>
 #include <kern/list.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
 #include <kern/spinlock.h>
-#include <kern/sprintf.h>
 #include <kern/syscnt.h>
 #include <kern/thread.h>
 #include <machine/biosmem.h>
 #include <machine/boot.h>
 #include <machine/cpu.h>
 #include <machine/lapic.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
+#include <machine/tcb.h>
 #include <machine/trap.h>
 #include <machine/types.h>
 #include <vm/vm_kmem.h>
@@ -91,15 +93,14 @@ struct pmap {
 typedef void (*pmap_walk_fn_t)(phys_addr_t pa, unsigned int index,
                                unsigned int level);
 
-static struct pmap kernel_pmap_store __read_mostly;
-struct pmap *kernel_pmap __read_mostly = &kernel_pmap_store;
-
 /*
  * The kernel per-CPU page tables are used early enough during bootstrap
  * that using a percpu variable would actually become ugly. This array
  * is rather small anyway.
  */
-static struct pmap_cpu_table kernel_pmap_cpu_tables[X15_MAX_CPUS] __read_mostly;
+static struct pmap_cpu_table pmap_kernel_cpu_tables[X15_MAX_CPUS] __read_mostly;
+
+struct pmap pmap_kernel_pmap;
 
 struct pmap *pmap_current_ptr __percpu;
 
@@ -113,8 +114,8 @@ struct pmap *pmap_current_ptr __percpu;
 /*
  * "Hidden" kernel root page tables for PAE mode.
  */
-static pmap_pte_t pmap_cpu_kpdpts[X15_MAX_CPUS][PMAP_L2_PTES_PER_PT]
-    __read_mostly __aligned(PMAP_PDPT_ALIGN);
+static alignas(PMAP_PDPT_ALIGN) pmap_pte_t
+    pmap_cpu_kpdpts[X15_MAX_CPUS][PMAP_L2_PTES_PER_PT] __read_mostly;
 
 #endif /* X15_X86_PAE */
 
@@ -184,13 +185,11 @@ struct pmap_update_op {
  * operation.
  */
 struct pmap_update_oplist {
-    struct cpumap cpumap;
+    alignas(CPU_L1_SIZE) struct cpumap cpumap;
     struct pmap *pmap;
     unsigned int nr_ops;
     struct pmap_update_op ops[PMAP_UPDATE_MAX_OPS];
-} __aligned(CPU_L1_SIZE);
-
-static unsigned int pmap_oplist_tsd_key __read_mostly;
+};
 
 /*
  * Statically allocated data for the main booter thread.
@@ -219,13 +218,13 @@ struct pmap_update_queue {
  * they perform.
  */
 struct pmap_syncer {
-    struct thread *thread;
+    alignas(CPU_L1_SIZE) struct thread *thread;
     struct pmap_update_queue queue;
     struct syscnt sc_updates;
     struct syscnt sc_update_enters;
     struct syscnt sc_update_removes;
     struct syscnt sc_update_protects;
-} __aligned(CPU_L1_SIZE);
+};
 
 static void pmap_sync(void *arg);
 
@@ -244,14 +243,14 @@ static struct pmap_syncer pmap_syncer __percpu;
  * individual TLB entries or globally flush the TLB.
  */
 struct pmap_update_request {
-    struct list node;
+    alignas(CPU_L1_SIZE) struct list node;
     struct spinlock lock;
     struct thread *sender;
     const struct pmap_update_oplist *oplist;
     unsigned int nr_mappings;
     int done;
     int error;
-} __aligned(CPU_L1_SIZE);
+};
 
 /*
  * Per processor array of requests.
@@ -437,7 +436,7 @@ pmap_setup_paging(void)
 
     va = vm_page_trunc((uintptr_t)&_boot);
     pa = va;
-    size = vm_page_round((uintptr_t)&_eboot) - va;
+    size = vm_page_round((uintptr_t)&_boot_end) - va;
 
     for (i = 0; i < size; i += PAGE_SIZE) {
         pmap_boot_enter(root_ptp, va, pa, PAGE_SIZE);
@@ -447,11 +446,12 @@ pmap_setup_paging(void)
 
     directmap_end = biosmem_directmap_end();
 
-    if (directmap_end > (VM_MAX_DIRECTMAP_ADDRESS - VM_MIN_DIRECTMAP_ADDRESS)) {
+    if (directmap_end > (PMAP_END_DIRECTMAP_ADDRESS
+                         - PMAP_START_DIRECTMAP_ADDRESS)) {
         boot_panic(pmap_panic_directmap_msg);
     }
 
-    va = VM_MIN_DIRECTMAP_ADDRESS;
+    va = PMAP_START_DIRECTMAP_ADDRESS;
     pa = 0;
 
     for (i = 0; i < directmap_end; i += pgsize) {
@@ -464,7 +464,7 @@ pmap_setup_paging(void)
     /*
      * On 64-bits systems, the kernel isn't linked at addresses included
      * in the direct mapping, which requires the creation of an additional
-     * mapping for it. See param.h for more details.
+     * mapping for it.
      */
     va = P2ALIGN((uintptr_t)&_init, pgsize);
     pa = BOOT_VTOP(va);
@@ -477,7 +477,7 @@ pmap_setup_paging(void)
     }
 #endif /* __LP64__ */
 
-    cpu_table = (void *)BOOT_VTOP((uintptr_t)&kernel_pmap_cpu_tables[0]);
+    cpu_table = (void *)BOOT_VTOP((uintptr_t)&pmap_kernel_cpu_tables[0]);
     cpu_table->root_ptp_pa = (uintptr_t)root_ptp;
 
     return root_ptp;
@@ -493,7 +493,7 @@ pmap_ap_setup_paging(void)
     pgsize = pmap_boot_get_pgsize();
     pmap_boot_enable_pgext(pgsize);
 
-    pmap = (void *)BOOT_VTOP((uintptr_t)&kernel_pmap_store);
+    pmap = (void *)BOOT_VTOP((uintptr_t)&pmap_kernel_pmap);
     cpu_table = (void *)BOOT_VTOP((uintptr_t)pmap->cpu_tables[boot_ap_id]);
 
 #ifdef X15_X86_PAE
@@ -509,14 +509,14 @@ pmap_ap_setup_paging(void)
 #define pmap_assert_range(pmap, start, end)             \
 MACRO_BEGIN                                             \
     assert((start) < (end));                            \
-    assert(((end) <= VM_MIN_DIRECTMAP_ADDRESS)          \
-           || ((start) >= VM_MAX_DIRECTMAP_ADDRESS));   \
+    assert(((end) <= PMAP_START_DIRECTMAP_ADDRESS)      \
+           || ((start) >= PMAP_END_DIRECTMAP_ADDRESS)); \
                                                         \
-    if ((pmap) == kernel_pmap) {                        \
-        assert(((start) >= VM_MIN_KMEM_ADDRESS)         \
-               && ((end) <= VM_MAX_KMEM_ADDRESS));      \
+    if ((pmap) == pmap_get_kernel_pmap()) {                        \
+        assert(((start) >= PMAP_START_KMEM_ADDRESS)     \
+               && ((end) <= PMAP_END_KMEM_ADDRESS));    \
     } else {                                            \
-        assert((end) <= VM_MAX_ADDRESS);                \
+        assert((end) <= PMAP_END_ADDRESS);              \
     }                                                   \
 MACRO_END
 
@@ -583,17 +583,17 @@ pmap_walk_vas(uintptr_t start, uintptr_t end, pmap_walk_fn_t walk_fn)
     assert(vm_page_aligned(start));
     assert(start < end);
 #ifdef __LP64__
-    assert((start < VM_MAX_ADDRESS) || (start >= VM_MIN_KERNEL_ADDRESS));
+    assert((start < PMAP_END_ADDRESS) || (start >= PMAP_START_KERNEL_ADDRESS));
 #endif /* __LP64__ */
 
     va = start;
-    root_ptp_pa = kernel_pmap->cpu_tables[cpu_id()]->root_ptp_pa;
+    root_ptp_pa = pmap_get_kernel_pmap()->cpu_tables[cpu_id()]->root_ptp_pa;
 
     do {
 #ifdef __LP64__
         /* Handle long mode canonical form */
-        if (va == VM_MAX_ADDRESS) {
-            va = VM_MIN_KERNEL_ADDRESS;
+        if (va == PMAP_END_ADDRESS) {
+            va = PMAP_START_KERNEL_ADDRESS;
         }
 #endif /* __LP64__ */
 
@@ -641,7 +641,7 @@ pmap_setup_global_page(phys_addr_t ptp_pa, unsigned int index,
 static void __init
 pmap_setup_global_pages(void)
 {
-    pmap_walk_vas(VM_MIN_KERNEL_ADDRESS, VM_MAX_KERNEL_ADDRESS,
+    pmap_walk_vas(PMAP_START_KERNEL_ADDRESS, PMAP_END_KERNEL_ADDRESS,
                   pmap_setup_global_page);
     pmap_pt_levels[0].mask |= PMAP_PTE_G;
     cpu_enable_global_pages();
@@ -674,11 +674,8 @@ pmap_update_oplist_create(struct pmap_update_oplist **oplistp)
 }
 
 static void
-pmap_update_oplist_destroy(void *arg)
+pmap_update_oplist_destroy(struct pmap_update_oplist *oplist)
 {
-    struct pmap_update_oplist *oplist;
-
-    oplist = arg;
     kmem_cache_free(&pmap_update_oplist_cache, oplist);
 }
 
@@ -687,7 +684,7 @@ pmap_update_oplist_get(void)
 {
     struct pmap_update_oplist *oplist;
 
-    oplist = thread_get_specific(pmap_oplist_tsd_key);
+    oplist = tcb_get_pmap_update_oplist(tcb_current());
     assert(oplist != NULL);
     return oplist;
 }
@@ -826,18 +823,18 @@ pmap_syncer_init(struct pmap_syncer *syncer, unsigned int cpu)
     syscnt_register(&syncer->sc_update_protects, name);
 }
 
-void __init
+static int __init
 pmap_bootstrap(void)
 {
     struct pmap_cpu_table *cpu_table;
     unsigned int i;
 
-    for (i = 0; i < ARRAY_SIZE(kernel_pmap->cpu_tables); i++) {
-        cpu_table = &kernel_pmap_cpu_tables[i];
-        kernel_pmap->cpu_tables[i] = cpu_table;
+    for (i = 0; i < ARRAY_SIZE(pmap_get_kernel_pmap()->cpu_tables); i++) {
+        cpu_table = &pmap_kernel_cpu_tables[i];
+        pmap_get_kernel_pmap()->cpu_tables[i] = cpu_table;
     }
 
-    cpu_local_assign(pmap_current_ptr, kernel_pmap);
+    cpu_local_assign(pmap_current_ptr, pmap_get_kernel_pmap());
 
     pmap_prot_table[VM_PROT_NONE] = 0;
     pmap_prot_table[VM_PROT_READ] = 0;
@@ -853,8 +850,7 @@ pmap_bootstrap(void)
     pmap_syncer_init(cpu_local_ptr(pmap_syncer), 0);
 
     pmap_update_oplist_ctor(&pmap_booter_oplist);
-    thread_key_create(&pmap_oplist_tsd_key, pmap_update_oplist_destroy);
-    thread_set_specific(pmap_oplist_tsd_key, &pmap_booter_oplist);
+    tcb_set_pmap_update_oplist(tcb_current(), &pmap_booter_oplist);
 
     cpumap_zero(&pmap_booter_cpumap);
     cpumap_set(&pmap_booter_cpumap, 0);
@@ -862,19 +858,16 @@ pmap_bootstrap(void)
     if (cpu_has_global_pages()) {
         pmap_setup_global_pages();
     }
+
+    return 0;
 }
 
-void __init
-pmap_ap_bootstrap(void)
-{
-    cpu_local_assign(pmap_current_ptr, kernel_pmap);
-
-    if (cpu_has_global_pages()) {
-        cpu_enable_global_pages();
-    } else {
-        cpu_tlb_flush();
-    }
-}
+INIT_OP_DEFINE(pmap_bootstrap,
+               INIT_OP_DEP(cpu_setup, true),
+               INIT_OP_DEP(mutex_setup, true),
+               INIT_OP_DEP(spinlock_setup, true),
+               INIT_OP_DEP(syscnt_setup, true),
+               INIT_OP_DEP(thread_bootstrap, true));
 
 static void __init
 pmap_setup_set_ptp_type(phys_addr_t ptp_pa, unsigned int index,
@@ -900,11 +893,11 @@ pmap_setup_set_ptp_type(phys_addr_t ptp_pa, unsigned int index,
 static void __init
 pmap_setup_fix_ptps(void)
 {
-    pmap_walk_vas(VM_MIN_ADDRESS, VM_MAX_KERNEL_ADDRESS,
+    pmap_walk_vas(PMAP_START_ADDRESS, PMAP_END_KERNEL_ADDRESS,
                   pmap_setup_set_ptp_type);
 }
 
-void __init
+static int __init
 pmap_setup(void)
 {
     pmap_setup_fix_ptps();
@@ -912,6 +905,25 @@ pmap_setup(void)
     kmem_cache_init(&pmap_update_oplist_cache, "pmap_update_oplist",
                     sizeof(struct pmap_update_oplist), CPU_L1_SIZE,
                     pmap_update_oplist_ctor, 0);
+    return 0;
+}
+
+INIT_OP_DEFINE(pmap_setup,
+               INIT_OP_DEP(kmem_setup, true),
+               INIT_OP_DEP(log_setup, true),
+               INIT_OP_DEP(pmap_bootstrap, true),
+               INIT_OP_DEP(vm_page_setup, true));
+
+void __init
+pmap_ap_setup(void)
+{
+    cpu_local_assign(pmap_current_ptr, pmap_get_kernel_pmap());
+
+    if (cpu_has_global_pages()) {
+        cpu_enable_global_pages();
+    } else {
+        cpu_tlb_flush();
+    }
 }
 
 static void __init
@@ -946,8 +958,8 @@ pmap_copy_cpu_table_recursive(const pmap_pte_t *sptp, unsigned int level,
          i++, va = P2END(va, 1UL << pt_level->skip)) {
 #ifdef __LP64__
         /* Handle long mode canonical form */
-        if (va == VM_MAX_ADDRESS) {
-            va = VM_MIN_KERNEL_ADDRESS;
+        if (va == PMAP_END_ADDRESS) {
+            va = PMAP_START_KERNEL_ADDRESS;
         }
 #endif /* __LP64__ */
 
@@ -980,14 +992,16 @@ static void __init
 pmap_copy_cpu_table(unsigned int cpu)
 {
     struct pmap_cpu_table *cpu_table;
+    struct pmap *kernel_pmap;
     unsigned int level;
     const pmap_pte_t *sptp;
     pmap_pte_t *dptp;
 
     assert(cpu != 0);
 
-    cpu_table = kernel_pmap->cpu_tables[cpu];
+    cpu_table = pmap_get_kernel_pmap()->cpu_tables[cpu];
     level = PMAP_NR_LEVELS - 1;
+    kernel_pmap = pmap_get_kernel_pmap();
     sptp = pmap_ptp_from_pa(kernel_pmap->cpu_tables[cpu_id()]->root_ptp_pa);
 
 #ifdef X15_X86_PAE
@@ -1006,7 +1020,7 @@ pmap_copy_cpu_table(unsigned int cpu)
     dptp = vm_page_direct_ptr(page);
 #endif /* X15_X86_PAE */
 
-    pmap_copy_cpu_table_recursive(sptp, level, dptp, VM_MIN_ADDRESS);
+    pmap_copy_cpu_table_recursive(sptp, level, dptp, PMAP_START_ADDRESS);
 }
 
 void __init
@@ -1017,6 +1031,7 @@ pmap_mp_setup(void)
     struct thread_attr attr;
     struct pmap_syncer *syncer;
     struct cpumap *cpumap;
+    struct tcb *tcb;
     unsigned int cpu;
     int error;
 
@@ -1046,8 +1061,9 @@ pmap_mp_setup(void)
             panic("pmap: unable to create syncer thread");
         }
 
-        oplist = thread_tsd_get(syncer->thread, pmap_oplist_tsd_key);
-        thread_tsd_set(syncer->thread, pmap_oplist_tsd_key, NULL);
+        tcb = thread_get_tcb(syncer->thread);
+        oplist = tcb_get_pmap_update_oplist(tcb);
+        tcb_set_pmap_update_oplist(tcb, NULL);
         kmem_cache_free(&pmap_update_oplist_cache, oplist);
     }
 
@@ -1061,7 +1077,7 @@ pmap_mp_setup(void)
 }
 
 int
-pmap_thread_init(struct thread *thread)
+pmap_thread_build(struct thread *thread)
 {
     struct pmap_update_oplist *oplist;
     int error;
@@ -1072,18 +1088,32 @@ pmap_thread_init(struct thread *thread)
         return error;
     }
 
-    thread_tsd_set(thread, pmap_oplist_tsd_key, oplist);
+    tcb_set_pmap_update_oplist(thread_get_tcb(thread), oplist);
     return 0;
+}
+
+void
+pmap_thread_cleanup(struct thread *thread)
+{
+    struct pmap_update_oplist *oplist;
+
+    oplist = tcb_get_pmap_update_oplist(thread_get_tcb(thread));
+
+    if (oplist) {
+        pmap_update_oplist_destroy(oplist);
+    }
 }
 
 int
 pmap_kextract(uintptr_t va, phys_addr_t *pap)
 {
     const struct pmap_pt_level *pt_level;
+    struct pmap *kernel_pmap;
     pmap_pte_t *ptp, *pte;
     unsigned int level;
 
     level = PMAP_NR_LEVELS - 1;
+    kernel_pmap = pmap_get_kernel_pmap();
     ptp = pmap_ptp_from_pa(kernel_pmap->cpu_tables[cpu_id()]->root_ptp_pa);
 
     for (;;) {
@@ -1141,7 +1171,7 @@ pmap_enter_local(struct pmap *pmap, uintptr_t va, phys_addr_t pa,
 
     pte_bits = PMAP_PTE_RW;
 
-    if (pmap != kernel_pmap) {
+    if (pmap != pmap_get_kernel_pmap()) {
         pte_bits |= PMAP_PTE_US;
     }
 
@@ -1162,7 +1192,7 @@ pmap_enter_local(struct pmap *pmap, uintptr_t va, phys_addr_t pa,
             page = vm_page_alloc(0, VM_PAGE_SEL_DIRECTMAP, VM_PAGE_PMAP);
 
             if (page == NULL) {
-                printk("pmap: warning: page table page allocation failure\n");
+                log_warning("pmap: page table page allocation failure");
                 return ERROR_NOMEM;
             }
 
@@ -1176,7 +1206,7 @@ pmap_enter_local(struct pmap *pmap, uintptr_t va, phys_addr_t pa,
     }
 
     assert(!pmap_pte_valid(*pte));
-    pte_bits = ((pmap == kernel_pmap) ? PMAP_PTE_G : PMAP_PTE_US)
+    pte_bits = ((pmap == pmap_get_kernel_pmap()) ? PMAP_PTE_G : PMAP_PTE_US)
                | pmap_prot_table[prot & VM_PROT_ALL];
     pmap_pte_set(pte, pa, pte_bits, pt_level);
     return 0;
@@ -1350,7 +1380,7 @@ pmap_protect(struct pmap *pmap, uintptr_t va, int prot,
 static void
 pmap_flush_tlb(struct pmap *pmap, uintptr_t start, uintptr_t end)
 {
-    if ((pmap != pmap_current()) && (pmap != kernel_pmap)) {
+    if ((pmap != pmap_current()) && (pmap != pmap_get_kernel_pmap())) {
         return;
     }
 
@@ -1363,11 +1393,11 @@ pmap_flush_tlb(struct pmap *pmap, uintptr_t start, uintptr_t end)
 static void
 pmap_flush_tlb_all(struct pmap *pmap)
 {
-    if ((pmap != pmap_current()) && (pmap != kernel_pmap)) {
+    if ((pmap != pmap_current()) && (pmap != pmap_get_kernel_pmap())) {
         return;
     }
 
-    if (pmap == kernel_pmap) {
+    if (pmap == pmap_get_kernel_pmap()) {
         cpu_tlb_flush_all();
     } else {
         cpu_tlb_flush();

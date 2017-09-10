@@ -16,14 +16,22 @@
  *
  *
  * Helper macros.
+ *
+ * This file is a top header in the inclusion hierarchy, and shouldn't include
+ * other headers that may cause circular dependencies.
  */
 
 #ifndef _KERN_MACROS_H
 #define _KERN_MACROS_H
 
-#ifndef __ASSEMBLER__
-#include <stddef.h>
-#endif /* __ASSEMBLER__ */
+#if !defined(__GNUC__) || (__GNUC__ < 4)
+#error "GCC 4+ required"
+#endif
+
+/*
+ * Attributes for variables that are mostly read and seldom changed.
+ */
+#define __read_mostly __section(".data.read_mostly")
 
 #define MACRO_BEGIN         ({
 #define MACRO_END           })
@@ -35,6 +43,16 @@
 #define DECL_CONST(x, s)    x
 #else /* __ASSEMBLER__ */
 #define __DECL_CONST(x, s)  x##s
+void cga_putc(char c);
+
+static inline void
+moo_print(const char *s)
+{
+    while (*s != '\0') {
+        cga_putc(*s);
+        s++;
+    }
+}
 #define DECL_CONST(x, s)    __DECL_CONST(x, s)
 #endif /* __ASSEMBLER__ */
 
@@ -48,35 +66,44 @@
 
 #define P2ALIGNED(x, a)     (((x) & ((a) - 1)) == 0)
 #define ISP2(x)             P2ALIGNED(x, x)
-#define P2ALIGN(x, a)       ((x) & -(a))
-#define P2ROUND(x, a)       (-(-(x) & -(a)))
-#define P2END(x, a)         (-(~(x) & -(a)))
+#define P2ALIGN(x, a)       ((x) & -(a))        /* decreases if not aligned */
+#define P2ROUND(x, a)       (-(-(x) & -(a)))    /* increases if not aligned */
+#define P2END(x, a)         (-(~(x) & -(a)))    /* always increases */
 
 #define structof(ptr, type, member) \
     ((type *)((char *)(ptr) - offsetof(type, member)))
-
-#define read_once(x)        (*(volatile typeof(x) *)&(x))
-#define write_once(x, v)    (read_once(x) = (v))
-
-#define alignof(x)          __alignof__(x)
 
 #define likely(expr)        __builtin_expect(!!(expr), 1)
 #define unlikely(expr)      __builtin_expect(!!(expr), 0)
 
 #define barrier()           asm volatile("" : : : "memory")
 
-#define __noreturn          __attribute__((noreturn))
-#define __aligned(x)        __attribute__((aligned(x)))
+/*
+ * The following macros may be provided by the C environment.
+ */
+
+#ifndef __noinline
+#define __noinline          __attribute__((noinline))
+#endif
 
 #ifndef __always_inline
 #define __always_inline     inline __attribute__((always_inline))
-#endif /* __attribute__ */
+#endif
 
+#ifndef __section
 #define __section(x)        __attribute__((section(x)))
-#define __packed            __attribute__((packed))
-#define __alias(x)          __attribute__((alias(x)))
+#endif
 
-#define __format_printf(fmt, args) \
-    __attribute__((format(printf, fmt, args)))
+#ifndef __packed
+#define __packed            __attribute__((packed))
+#endif
+
+#ifndef __unused
+#define __unused            __attribute__((unused))
+#endif
+
+#ifndef __used
+#define __used              __attribute__((used))
+#endif
 
 #endif /* _KERN_MACROS_H */

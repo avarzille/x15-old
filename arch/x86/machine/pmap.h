@@ -24,6 +24,71 @@
 #include <kern/macros.h>
 
 /*
+ * Virtual memory layout.
+ */
+
+/*
+ * User space boundaries.
+ */
+#define PMAP_START_ADDRESS              DECL_CONST(0, UL)
+
+#ifdef __LP64__
+#define PMAP_END_ADDRESS                DECL_CONST(0x800000000000, UL)
+#else /* __LP64__ */
+#define PMAP_END_ADDRESS                DECL_CONST(0xc0000000, UL)
+#endif/* __LP64__ */
+
+/*
+ * Kernel space boundaries.
+ */
+#ifdef __LP64__
+#define PMAP_START_KERNEL_ADDRESS       DECL_CONST(0xffff800000000000, UL)
+#define PMAP_END_KERNEL_ADDRESS         DECL_CONST(0xfffffffffffff000, UL)
+#else /* __LP64__ */
+#define PMAP_START_KERNEL_ADDRESS       PMAP_END_ADDRESS
+#define PMAP_END_KERNEL_ADDRESS         DECL_CONST(0xfffff000, UL)
+#endif /* __LP64__ */
+
+/*
+ * Direct physical mapping boundaries.
+ */
+#ifdef __LP64__
+#define PMAP_START_DIRECTMAP_ADDRESS    PMAP_START_KERNEL_ADDRESS
+#define PMAP_END_DIRECTMAP_ADDRESS      DECL_CONST(0xffffc00000000000, UL)
+#else /* __LP64__ */
+#define PMAP_START_DIRECTMAP_ADDRESS    PMAP_END_ADDRESS
+#define PMAP_END_DIRECTMAP_ADDRESS      DECL_CONST(0xf8000000, UL)
+#endif /* __LP64__ */
+
+/*
+ * Kernel mapping offset.
+ *
+ * On 32-bits systems, the kernel is linked at addresses included in the
+ * direct physical mapping, whereas on 64-bits systems, it is linked at
+ * -2 GiB because the "kernel" memory model is used when compiling (see
+ * the -mcmodel=kernel gcc option).
+ */
+#ifdef __LP64__
+#define PMAP_KERNEL_OFFSET              DECL_CONST(0xffffffff80000000, UL)
+#else /* __LP64__ */
+#define PMAP_KERNEL_OFFSET              PMAP_START_DIRECTMAP_ADDRESS
+#endif /* __LP64__ */
+
+/*
+ * Kernel virtual space boundaries.
+ *
+ * In addition to the direct physical mapping, the kernel has its own virtual
+ * memory space.
+ */
+#define PMAP_START_KMEM_ADDRESS         PMAP_END_DIRECTMAP_ADDRESS
+
+#ifdef __LP64__
+#define PMAP_END_KMEM_ADDRESS           PMAP_KERNEL_OFFSET
+#else /* __LP64__ */
+#define PMAP_END_KMEM_ADDRESS           PMAP_END_KERNEL_ADDRESS
+#endif /* __LP64__ */
+
+/*
  * Page table entry flags.
  */
 #define PMAP_PTE_P      0x00000001
@@ -99,11 +164,11 @@
 #include <stdint.h>
 
 #include <kern/cpumap.h>
+#include <kern/init.h>
 #include <kern/list.h>
 #include <kern/mutex.h>
 #include <kern/thread.h>
 #include <machine/cpu.h>
-#include <machine/trap.h>
 #include <machine/types.h>
 
 /*
@@ -118,10 +183,13 @@ typedef phys_addr_t pmap_pte_t;
  */
 struct pmap;
 
-/*
- * The kernel pmap.
- */
-extern struct pmap *kernel_pmap;
+static inline struct pmap *
+pmap_get_kernel_pmap(void)
+{
+    extern struct pmap pmap_kernel_pmap;
+
+    return &pmap_kernel_pmap;
+}
 
 /*
  * Early initialization of the MMU.
@@ -138,22 +206,9 @@ pmap_pte_t * pmap_setup_paging(void);
 pmap_pte_t * pmap_ap_setup_paging(void);
 
 /*
- * Early initialization of the pmap module.
+ * Initialize the pmap module on APs.
  */
-void pmap_bootstrap(void);
-
-/*
- * Early initialization of the MMU on APs.
- */
-void pmap_ap_bootstrap(void);
-
-/*
- * Set up the pmap module.
- *
- * This function should only be called by the VM system, once kernel
- * allocations can be performed safely.
- */
-void pmap_setup(void);
+void pmap_ap_setup(void);
 
 /*
  * Set up the pmap module for multiprocessor operations.
@@ -168,9 +223,10 @@ void pmap_setup(void);
 void pmap_mp_setup(void);
 
 /*
- * Initialize pmap thread-specific data for the given thread.
+ * Build/clean up pmap thread-local data for the given thread.
  */
-int pmap_thread_init(struct thread *thread);
+int pmap_thread_build(struct thread *thread);
+void pmap_thread_cleanup(struct thread *thread);
 
 /*
  * Extract a mapping from the kernel map.
@@ -264,6 +320,19 @@ pmap_current(void)
     extern struct pmap *pmap_current_ptr;
     return cpu_local_read(pmap_current_ptr);
 }
+
+/*
+ * This init operation provides :
+ *  - kernel pmap operations
+ */
+INIT_OP_DECLARE(pmap_bootstrap);
+
+/*
+ * This init operation provides :
+ *  - user pmap creation
+ *  - module fully initialized
+ */
+INIT_OP_DECLARE(pmap_setup);
 
 #endif /* __ASSEMBLER__ */
 

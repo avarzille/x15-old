@@ -21,10 +21,10 @@
 #ifndef _KERN_RBTREE_H
 #define _KERN_RBTREE_H
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include <kern/assert.h>
 #include <kern/macros.h>
 
 /*
@@ -47,6 +47,11 @@ struct rbtree;
  * Insertion point identifier.
  */
 typedef uintptr_t rbtree_slot_t;
+
+/*
+ * Static tree initializer.
+ */
+#define RBTREE_INITIALIZER { NULL }
 
 #include <kern/rbtree_i.h>
 
@@ -209,7 +214,7 @@ MACRO_END
  *
  * This macro essentially acts as rbtree_lookup() but in addition to a node,
  * it also returns a slot, which identifies an insertion point in the tree.
- * If the returned node is null, the slot can be used by rbtree_insert_slot()
+ * If the returned node is NULL, the slot can be used by rbtree_insert_slot()
  * to insert without the overhead of an additional lookup.
  *
  * The constraints that apply to the key parameter are the same as for
@@ -247,7 +252,7 @@ MACRO_END
  * obtain the insertion point with a standard lookup. The insertion point
  * is obtained by calling rbtree_lookup_slot(). In addition, the new node
  * must not compare equal to an existing node in the tree (i.e. the slot
- * must denote a null node).
+ * must denote a NULL node).
  */
 static inline void
 rbtree_insert_slot(struct rbtree *tree, rbtree_slot_t slot,
@@ -260,6 +265,15 @@ rbtree_insert_slot(struct rbtree *tree, rbtree_slot_t slot,
     index = rbtree_slot_index(slot);
     rbtree_insert_rebalance(tree, parent, index, node);
 }
+
+/*
+ * Replace a node at an insertion point in a tree.
+ *
+ * The given node must compare strictly equal to the previous node,
+ * which is returned on completion.
+ */
+void * rbtree_replace_slot(struct rbtree *tree, rbtree_slot_t slot,
+                           struct rbtree_node *node);
 
 /*
  * Remove a node from a tree.

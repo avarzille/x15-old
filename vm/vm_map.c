@@ -19,10 +19,11 @@
  * needed for kernel allocation.
  */
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#include <kern/assert.h>
 #include <kern/error.h>
 #include <kern/init.h>
 #include <kern/kmem.h>
@@ -30,9 +31,10 @@
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
-#include <kern/printk.h>
 #include <kern/rbtree.h>
+#include <kern/shell.h>
+#include <kern/task.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
 #include <vm/vm_adv.h>
 #include <vm/vm_inherit.h>
@@ -73,6 +75,8 @@ static int vm_map_insert(struct vm_map *map, struct vm_map_entry *entry,
 
 static struct kmem_cache vm_map_entry_cache;
 static struct kmem_cache vm_map_cache;
+
+struct vm_map vm_map_kernel_map;
 
 static struct vm_map_entry *
 vm_map_entry_create(void)
@@ -695,17 +699,80 @@ vm_map_init(struct vm_map *map, struct pmap *pmap,
     map->pmap = pmap;
 }
 
-void __init
-vm_map_setup(void)
+#ifdef X15_ENABLE_SHELL
+
+static void
+vm_map_shell_info(int argc, char **argv)
 {
-    vm_map_init(kernel_map, kernel_pmap,
-                VM_MIN_KMEM_ADDRESS, VM_MAX_KMEM_ADDRESS);
+    const struct task *task;
+
+    if (argc < 2) {
+        goto error;
+    } else {
+        task = task_lookup(argv[1]);
+
+        if (task == NULL) {
+            goto error;
+        }
+
+        vm_map_info(task_get_vm_map(task));
+    }
+
+    return;
+
+error:
+    printf("vm_map: info: invalid arguments\n");
+}
+
+static struct shell_cmd vm_map_shell_cmds[] = {
+    SHELL_CMD_INITIALIZER("vm_map_info", vm_map_shell_info,
+        "vm_map_info <task_name>",
+        "display information about a VM map"),
+};
+
+static int __init
+vm_map_setup_shell(void)
+{
+    SHELL_REGISTER_CMDS(vm_map_shell_cmds);
+    return 0;
+}
+
+INIT_OP_DEFINE(vm_map_setup_shell,
+               INIT_OP_DEP(mutex_setup, true),
+               INIT_OP_DEP(printf_setup, true),
+               INIT_OP_DEP(shell_setup, true),
+               INIT_OP_DEP(task_setup, true),
+               INIT_OP_DEP(vm_map_setup, true));
+
+#endif /* X15_ENABLE_SHELL */
+
+static int __init
+vm_map_bootstrap(void)
+{
+    vm_map_init(vm_map_get_kernel_map(), pmap_get_kernel_pmap(),
+                PMAP_START_KMEM_ADDRESS, PMAP_END_KMEM_ADDRESS);
     kmem_cache_init(&vm_map_entry_cache, "vm_map_entry",
                     sizeof(struct vm_map_entry), 0, NULL,
                     KMEM_CACHE_PAGE_ONLY);
-    kmem_cache_init(&vm_map_cache, "vm_map", sizeof(struct vm_map),
-                    0, NULL, 0);
+    return 0;
 }
+
+INIT_OP_DEFINE(vm_map_bootstrap,
+               INIT_OP_DEP(kmem_bootstrap, true),
+               INIT_OP_DEP(thread_bootstrap, true));
+
+static int __init
+vm_map_setup(void)
+{
+    kmem_cache_init(&vm_map_cache, "vm_map", sizeof(struct vm_map),
+                    0, NULL, KMEM_CACHE_PAGE_ONLY);
+    return 0;
+}
+
+INIT_OP_DEFINE(vm_map_setup,
+               INIT_OP_DEP(pmap_setup, true),
+               INIT_OP_DEP(printf_setup, true),
+               INIT_OP_DEP(vm_map_bootstrap, true));
 
 int
 vm_map_create(struct vm_map **mapp)
@@ -727,7 +794,7 @@ vm_map_create(struct vm_map **mapp)
         goto error_pmap;
     }
 
-    vm_map_init(map, pmap, VM_MIN_ADDRESS, VM_MAX_ADDRESS);
+    vm_map_init(map, pmap, PMAP_START_ADDRESS, PMAP_END_ADDRESS);
     *mapp = map;
     return 0;
 
@@ -743,7 +810,7 @@ vm_map_info(struct vm_map *map)
     struct vm_map_entry *entry;
     const char *type, *name;
 
-    if (map == kernel_map) {
+    if (map == vm_map_get_kernel_map()) {
         name = "kernel map";
     } else {
         name = "map";
@@ -751,7 +818,7 @@ vm_map_info(struct vm_map *map)
 
     mutex_lock(&map->lock);
 
-    printk("vm_map: %s: %016lx-%016lx\n"
+    printf("vm_map: %s: %016lx-%016lx\n"
            "vm_map:      start             end          "
            "size     offset   flags    type\n", name,
            (unsigned long)map->start, (unsigned long)map->end);
@@ -763,13 +830,13 @@ vm_map_info(struct vm_map *map)
             type = "object";
         }
 
-        printk("vm_map: %016lx %016lx %8luk %08llx %08x %s\n",
+        printf("vm_map: %016lx %016lx %8luk %08llx %08x %s\n",
                (unsigned long)entry->start, (unsigned long)entry->end,
                (unsigned long)(entry->end - entry->start) >> 10,
                (unsigned long long)entry->offset, entry->flags, type);
     }
 
-    printk("vm_map: total: %zuk\n", map->size >> 10);
+    printf("vm_map: total: %zuk\n", map->size >> 10);
 
     mutex_unlock(&map->lock);
 }

@@ -32,9 +32,11 @@
 #ifndef _KERN_SEMAPHORE_H
 #define _KERN_SEMAPHORE_H
 
-#include <kern/assert.h>
+#include <assert.h>
+#include <stdint.h>
+
+#include <kern/atomic.h>
 #include <kern/error.h>
-#include <kern/macros.h>
 
 #define SEMAPHORE_VALUE_MAX 32768
 
@@ -86,11 +88,23 @@ semaphore_wait(struct semaphore *semaphore)
 
     prev = semaphore_dec(semaphore);
 
-    if (prev != 0) {
-        return;
+    if (prev == 0) {
+        semaphore_wait_slow(semaphore);
+    }
+}
+
+static inline int
+semaphore_timedwait(struct semaphore *semaphore, uint64_t ticks)
+{
+    unsigned int prev;
+
+    prev = semaphore_dec(semaphore);
+
+    if (prev == 0) {
+        return semaphore_timedwait_slow(semaphore, ticks);
     }
 
-    semaphore_wait_slow(semaphore);
+    return 0;
 }
 
 /*
@@ -108,11 +122,9 @@ semaphore_post(struct semaphore *semaphore)
 
     prev = semaphore_inc(semaphore);
 
-    if (prev != 0) {
-        return;
+    if (prev == 0) {
+        semaphore_post_slow(semaphore);
     }
-
-    semaphore_post_slow(semaphore);
 }
 
 /*
@@ -121,7 +133,7 @@ semaphore_post(struct semaphore *semaphore)
 static inline unsigned int
 semaphore_getvalue(const struct semaphore *semaphore)
 {
-    return read_once(semaphore->value);
+    return atomic_load(&semaphore->value, ATOMIC_RELAXED);
 }
 
 #endif /* _KERN_SEMAPHORE_H */

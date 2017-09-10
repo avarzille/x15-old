@@ -24,11 +24,11 @@
 #ifndef _KERN_BITMAP_H
 #define _KERN_BITMAP_H
 
+#include <limits.h>
 #include <string.h>
 
 #include <kern/atomic.h>
 #include <kern/bitmap_i.h>
-#include <kern/limits.h>
 
 #define BITMAP_DECLARE(name, nr_bits) unsigned long name[BITMAP_LONGS(nr_bits)]
 
@@ -65,7 +65,7 @@ static inline void
 bitmap_set(unsigned long *bm, int bit)
 {
     if (bit >= LONG_BIT) {
-        bitmap_lookup(bm, bit);
+        bitmap_lookup(&bm, &bit);
     }
 
     *bm |= bitmap_mask(bit);
@@ -75,17 +75,17 @@ static inline void
 bitmap_set_atomic(unsigned long *bm, int bit)
 {
     if (bit >= LONG_BIT) {
-        bitmap_lookup(bm, bit);
+        bitmap_lookup(&bm, &bit);
     }
 
-    atomic_or_acq_rel(bm, bitmap_mask(bit));
+    atomic_or(bm, bitmap_mask(bit), ATOMIC_RELEASE);
 }
 
 static inline void
 bitmap_clear(unsigned long *bm, int bit)
 {
     if (bit >= LONG_BIT) {
-        bitmap_lookup(bm, bit);
+        bitmap_lookup(&bm, &bit);
     }
 
     *bm &= ~bitmap_mask(bit);
@@ -95,20 +95,30 @@ static inline void
 bitmap_clear_atomic(unsigned long *bm, int bit)
 {
     if (bit >= LONG_BIT) {
-        bitmap_lookup(bm, bit);
+        bitmap_lookup(&bm, &bit);
     }
 
-    atomic_and_acq_rel(bm, ~bitmap_mask(bit));
+    atomic_and(bm, ~bitmap_mask(bit), ATOMIC_RELEASE);
 }
 
 static inline int
 bitmap_test(const unsigned long *bm, int bit)
 {
     if (bit >= LONG_BIT) {
-        bitmap_lookup(bm, bit);
+        bitmap_lookup(&bm, &bit);
     }
 
     return ((*bm & bitmap_mask(bit)) != 0);
+}
+
+static inline int
+bitmap_test_atomic(const unsigned long *bm, int bit)
+{
+    if (bit >= LONG_BIT) {
+        bitmap_lookup(&bm, &bit);
+    }
+
+    return ((atomic_load(bm, ATOMIC_ACQUIRE) & bitmap_mask(bit)) != 0);
 }
 
 static inline void

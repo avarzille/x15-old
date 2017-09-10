@@ -13,14 +13,20 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ *
+ * Despite comparison and scan instructions not having side-effects, the
+ * memory clobber is used because the compiler cannot infer dependencies
+ * on the memory referenced by the pointers.
  */
 
 #include <stddef.h>
 #include <string.h>
 
-#include <kern/param.h>
+#include <kern/macros.h>
+#include <machine/string.h>
 
-#ifdef ARCH_STRING_MEMCPY
+#ifdef STRING_ARCH_MEMCPY
 void *
 memcpy(void *dest, const void *src, size_t n)
 {
@@ -32,9 +38,9 @@ memcpy(void *dest, const void *src, size_t n)
                  : : "memory");
     return orig_dest;
 }
-#endif /* ARCH_STRING_MEMCPY */
+#endif /* STRING_ARCH_MEMCPY */
 
-#ifdef ARCH_STRING_MEMMOVE
+#ifdef STRING_ARCH_MEMMOVE
 void *
 memmove(void *dest, const void *src, size_t n)
 {
@@ -56,9 +62,9 @@ memmove(void *dest, const void *src, size_t n)
 
     return orig_dest;
 }
-#endif /* ARCH_STRING_MEMMOVE */
+#endif /* STRING_ARCH_MEMMOVE */
 
-#ifdef ARCH_STRING_MEMSET
+#ifdef STRING_ARCH_MEMSET
 void *
 memset(void *s, int c, size_t n)
 {
@@ -71,9 +77,9 @@ memset(void *s, int c, size_t n)
                  : "memory");
     return orig_s;
 }
-#endif /* ARCH_STRING_MEMSET */
+#endif /* STRING_ARCH_MEMSET */
 
-#ifdef ARCH_STRING_MEMCMP
+#ifdef STRING_ARCH_MEMCMP
 int
 memcmp(const void *s1, const void *s2, size_t n)
 {
@@ -90,9 +96,9 @@ memcmp(const void *s1, const void *s2, size_t n)
     c2 = *(((const unsigned char *)s2) - 1);
     return (int)c1 - (int)c2;
 }
-#endif /* ARCH_STRING_MEMCMP */
+#endif /* STRING_ARCH_MEMCMP */
 
-#ifdef ARCH_STRING_STRLEN
+#ifdef STRING_ARCH_STRLEN
 size_t
 strlen(const char *s)
 {
@@ -103,11 +109,11 @@ strlen(const char *s)
                  : "+D" (s), "+c" (n)
                  : "a" (0)
                  : "memory");
-    return ~n - 1;
+    return (size_t)-2 - n;
 }
-#endif /* ARCH_STRING_STRLEN */
+#endif /* STRING_ARCH_STRLEN */
 
-#ifdef ARCH_STRING_STRCPY
+#ifdef STRING_ARCH_STRCPY
 char *
 strcpy(char *dest, const char *src)
 {
@@ -123,9 +129,9 @@ strcpy(char *dest, const char *src)
                  : : "al", "memory");
     return orig_dest;
 }
-#endif /* ARCH_STRING_STRCPY */
+#endif /* STRING_ARCH_STRCPY */
 
-#ifdef ARCH_STRING_STRCMP
+#ifdef STRING_ARCH_STRCMP
 int
 strcmp(const char *s1, const char *s2)
 {
@@ -144,4 +150,51 @@ strcmp(const char *s1, const char *s2)
     c2 = *(((const unsigned char *)s2) - 1);
     return (int)c1 - (int)c2;
 }
-#endif /* ARCH_STRING_STRCMP */
+#endif /* STRING_ARCH_STRCMP */
+
+#ifdef STRING_ARCH_STRNCMP
+int
+strncmp(const char *s1, const char *s2, size_t n)
+{
+    unsigned char c1, c2;
+
+    if (unlikely(n == 0)) {
+        return 0;
+    }
+
+    asm volatile("1:\n"
+                 "lodsb\n"
+                 "scasb\n"
+                 "jne 1f\n"
+                 "testb %%al, %%al\n"
+                 "jz 1f\n"
+                 "dec %2\n"
+                 "jnz 1b\n"
+                 "1:\n"
+                 : "+D" (s1), "+S" (s2), "+c" (n)
+                 : : "al", "memory");
+    c1 = *(((const unsigned char *)s1) - 1);
+    c2 = *(((const unsigned char *)s2) - 1);
+    return (int)c1 - (int)c2;
+}
+#endif /* STRING_ARCH_STRNCMP */
+
+#ifdef STRING_ARCH_STRCHR
+char *
+strchr(const char *s, int c)
+{
+    asm volatile("1:\n"
+                 "lodsb\n"
+                 "cmpb %%al, %1\n"
+                 "je 1f\n"
+                 "testb %%al, %%al\n"
+                 "jnz 1b\n"
+                 "mov $1, %0\n"
+                 "1:\n"
+                 "dec %0\n"
+                 : "+S" (s)
+                 : "c" ((char)c)
+                 : "al", "memory");
+    return (char *)s;
+}
+#endif /* STRING_ARCH_STRCHR */

@@ -29,27 +29,27 @@
  * The symmetric case is handled likewise.
  */
 
+#include <assert.h>
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#include <kern/assert.h>
 #include <kern/init.h>
 #include <kern/list.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
-#include <kern/printk.h>
-#include <kern/sprintf.h>
+#include <kern/shell.h>
 #include <kern/thread.h>
+#include <machine/boot.h>
 #include <machine/cpu.h>
-#include <machine/pmap.h>
+#include <machine/page.h>
+#include <machine/pmem.h>
 #include <machine/types.h>
 #include <vm/vm_page.h>
-
-#define DEBUG 0
 
 /*
  * Number of free block lists per zone.
@@ -77,12 +77,12 @@
  * Per-processor cache of pages.
  */
 struct vm_page_cpu_pool {
-    struct mutex lock;
+    alignas(CPU_L1_SIZE) struct mutex lock;
     int size;
     int transfer_size;
     int nr_pages;
     struct list pages;
-} __aligned(CPU_L1_SIZE);
+};
 
 /*
  * Special order value for pages that aren't in a free list. Such pages are
@@ -147,12 +147,12 @@ static int vm_page_is_ready __read_mostly;
  * the direct physical mapping, DMA and DMA32 are aliases for DIRECTMAP,
  * in which case the zone table contains DIRECTMAP and HIGHMEM only.
  */
-static struct vm_page_zone vm_page_zones[VM_PAGE_MAX_ZONES];
+static struct vm_page_zone vm_page_zones[PMEM_MAX_ZONES];
 
 /*
  * Bootstrap zone table.
  */
-static struct vm_page_boot_zone vm_page_boot_zones[VM_PAGE_MAX_ZONES]
+static struct vm_page_boot_zone vm_page_boot_zones[PMEM_MAX_ZONES]
     __initdata;
 
 /*
@@ -168,6 +168,10 @@ vm_page_init(struct vm_page *page, unsigned short zone_index, phys_addr_t pa)
     page->zone_index = zone_index;
     page->order = VM_PAGE_ORDER_UNLISTED;
     page->phys_addr = pa;
+
+    page->nr_refs = 0;
+
+    page->object = NULL;
 }
 
 void
@@ -262,13 +266,13 @@ vm_page_zone_free_to_buddy(struct vm_page_zone *zone, struct vm_page *page,
     pa = page->phys_addr;
 
     while (order < (VM_PAGE_NR_FREE_LISTS - 1)) {
-        buddy_pa = pa ^ vm_page_ptoa(1 << order);
+        buddy_pa = pa ^ vm_page_ptob(1 << order);
 
         if ((buddy_pa < zone->start) || (buddy_pa >= zone->end)) {
             break;
         }
 
-        buddy = &zone->pages[vm_page_atop(buddy_pa - zone->start)];
+        buddy = &zone->pages[vm_page_btop(buddy_pa - zone->start)];
 
         if (buddy->order != order) {
             break;
@@ -277,8 +281,8 @@ vm_page_zone_free_to_buddy(struct vm_page_zone *zone, struct vm_page *page,
         vm_page_free_list_remove(&zone->free_lists[order], buddy);
         buddy->order = VM_PAGE_ORDER_UNLISTED;
         order++;
-        pa &= -vm_page_ptoa(1 << order);
-        page = &zone->pages[vm_page_atop(pa - zone->start)];
+        pa &= -vm_page_ptob(1 << order);
+        page = &zone->pages[vm_page_btop(pa - zone->start)];
     }
 
     vm_page_free_list_insert(&zone->free_lists[order], page);
@@ -379,7 +383,7 @@ vm_page_zone_compute_pool_size(struct vm_page_zone *zone)
 {
     phys_addr_t size;
 
-    size = vm_page_atop(vm_page_zone_size(zone)) / VM_PAGE_CPU_POOL_RATIO;
+    size = vm_page_btop(vm_page_zone_size(zone)) / VM_PAGE_CPU_POOL_RATIO;
 
     if (size == 0) {
         size = 1;
@@ -407,7 +411,7 @@ vm_page_zone_init(struct vm_page_zone *zone, phys_addr_t start, phys_addr_t end,
     }
 
     zone->pages = pages;
-    zone->pages_end = pages + vm_page_atop(vm_page_zone_size(zone));
+    zone->pages_end = pages + vm_page_btop(vm_page_zone_size(zone));
     mutex_init(&zone->lock);
 
     for (i = 0; i < ARRAY_SIZE(zone->free_lists); i++) {
@@ -418,7 +422,7 @@ vm_page_zone_init(struct vm_page_zone *zone, phys_addr_t start, phys_addr_t end,
     i = zone - vm_page_zones;
 
     for (pa = zone->start; pa < zone->end; pa += PAGE_SIZE) {
-        vm_page_init(&pages[vm_page_atop(pa - zone->start)], i, pa);
+        vm_page_init(&pages[vm_page_btop(pa - zone->start)], i, pa);
     }
 }
 
@@ -511,11 +515,9 @@ vm_page_load(unsigned int zone_index, phys_addr_t start, phys_addr_t end)
     zone->end = end;
     zone->heap_present = false;
 
-#if DEBUG
-    printk("vm_page: load: %s: %llx:%llx\n",
-           vm_page_zone_name(zone_index),
-           (unsigned long long)start, (unsigned long long)end);
-#endif
+    log_debug("vm_page: load: %s: %llx:%llx",
+              vm_page_zone_name(zone_index),
+              (unsigned long long)start, (unsigned long long)end);
 
     vm_page_zones_size++;
 }
@@ -538,11 +540,9 @@ vm_page_load_heap(unsigned int zone_index, phys_addr_t start, phys_addr_t end)
     zone->avail_end = end;
     zone->heap_present = true;
 
-#if DEBUG
-    printk("vm_page: heap: %s: %llx:%llx\n",
-           vm_page_zone_name(zone_index),
-           (unsigned long long)start, (unsigned long long)end);
-#endif
+    log_debug("vm_page: heap: %s: %llx:%llx",
+              vm_page_zone_name(zone_index),
+              (unsigned long long)start, (unsigned long long)end);
 }
 
 int
@@ -558,16 +558,16 @@ vm_page_select_alloc_zone(unsigned int selector)
 
     switch (selector) {
     case VM_PAGE_SEL_DMA:
-        zone_index = VM_PAGE_ZONE_DMA;
+        zone_index = PMEM_ZONE_DMA;
         break;
     case VM_PAGE_SEL_DMA32:
-        zone_index = VM_PAGE_ZONE_DMA32;
+        zone_index = PMEM_ZONE_DMA32;
         break;
     case VM_PAGE_SEL_DIRECTMAP:
-        zone_index = VM_PAGE_ZONE_DIRECTMAP;
+        zone_index = PMEM_ZONE_DIRECTMAP;
         break;
     case VM_PAGE_SEL_HIGHMEM:
-        zone_index = VM_PAGE_ZONE_HIGHMEM;
+        zone_index = PMEM_ZONE_HIGHMEM;
         break;
     default:
         panic("vm_page: invalid selector");
@@ -641,7 +641,59 @@ vm_page_bootalloc(size_t size)
     panic("vm_page: no physical memory available");
 }
 
-void __init
+static void
+vm_page_info_common(int (*print_fn)(const char *format, ...))
+{
+    struct vm_page_zone *zone;
+    unsigned long pages;
+    unsigned int i;
+
+    for (i = 0; i < vm_page_zones_size; i++) {
+        zone = &vm_page_zones[i];
+        pages = (unsigned long)(zone->pages_end - zone->pages);
+        print_fn("vm_page: %s: pages: %lu (%luM), free: %lu (%luM)\n",
+                 vm_page_zone_name(i), pages, pages >> (20 - PAGE_SHIFT),
+                 zone->nr_free_pages, zone->nr_free_pages >> (20 - PAGE_SHIFT));
+    }
+}
+
+#ifdef X15_ENABLE_SHELL
+
+static void
+vm_page_info(void)
+{
+    vm_page_info_common(printf);
+}
+
+static void
+vm_page_shell_info(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    vm_page_info();
+}
+
+static struct shell_cmd vm_page_shell_cmds[] = {
+    SHELL_CMD_INITIALIZER("vm_page_info", vm_page_shell_info,
+        "vm_page_info",
+        "display information about physical memory"),
+};
+
+static int __init
+vm_page_setup_shell(void)
+{
+    SHELL_REGISTER_CMDS(vm_page_shell_cmds);
+    return 0;
+}
+
+INIT_OP_DEFINE(vm_page_setup_shell,
+               INIT_OP_DEP(printf_setup, true),
+               INIT_OP_DEP(shell_setup, true),
+               INIT_OP_DEP(vm_page_setup, true));
+
+#endif /* X15_ENABLE_SHELL */
+
+static int __init
 vm_page_setup(void)
 {
     struct vm_page_boot_zone *boot_zone;
@@ -660,12 +712,12 @@ vm_page_setup(void)
     nr_pages = 0;
 
     for (i = 0; i < vm_page_zones_size; i++) {
-        nr_pages += vm_page_atop(vm_page_boot_zone_size(&vm_page_boot_zones[i]));
+        nr_pages += vm_page_btop(vm_page_boot_zone_size(&vm_page_boot_zones[i]));
     }
 
     table_size = vm_page_round(nr_pages * sizeof(struct vm_page));
-    printk("vm_page: page table size: %zu entries (%zuk)\n", nr_pages,
-           table_size >> 10);
+    log_info("vm_page: page table size: %zu entries (%zuk)", nr_pages,
+             table_size >> 10);
     table = vm_page_bootalloc(table_size);
     va = (uintptr_t)table;
 
@@ -678,9 +730,9 @@ vm_page_setup(void)
         zone = &vm_page_zones[i];
         boot_zone = &vm_page_boot_zones[i];
         vm_page_zone_init(zone, boot_zone->start, boot_zone->end, table);
-        page = zone->pages + vm_page_atop(boot_zone->avail_start
+        page = zone->pages + vm_page_btop(boot_zone->avail_start
                                           - boot_zone->start);
-        end = zone->pages + vm_page_atop(boot_zone->avail_end
+        end = zone->pages + vm_page_btop(boot_zone->avail_end
                                          - boot_zone->start);
 
         while (page < end) {
@@ -689,7 +741,7 @@ vm_page_setup(void)
             page++;
         }
 
-        table += vm_page_atop(vm_page_zone_size(zone));
+        table += vm_page_btop(vm_page_zone_size(zone));
     }
 
     while (va < (uintptr_t)table) {
@@ -701,8 +753,16 @@ vm_page_setup(void)
     }
 
     vm_page_is_ready = 1;
+
+    return 0;
 }
 
+INIT_OP_DEFINE(vm_page_setup,
+               INIT_OP_DEP(boot_load_vm_page_zones, true),
+               INIT_OP_DEP(log_setup, true),
+               INIT_OP_DEP(printf_setup, true));
+
+/* TODO Rename to avoid confusion with "managed pages" */
 void __init
 vm_page_manage(struct vm_page *page)
 {
@@ -723,11 +783,27 @@ vm_page_lookup(phys_addr_t pa)
         zone = &vm_page_zones[i];
 
         if ((pa >= zone->start) && (pa < zone->end)) {
-            return &zone->pages[vm_page_atop(pa - zone->start)];
+            return &zone->pages[vm_page_btop(pa - zone->start)];
         }
     }
 
     return NULL;
+}
+
+__unused static bool
+vm_page_block_referenced(const struct vm_page *page, unsigned int order)
+{
+    unsigned int i, nr_pages;
+
+    nr_pages = 1 << order;
+
+    for (i = 0; i < nr_pages; i++) {
+        if (vm_page_referenced(&page[i])) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 struct vm_page *
@@ -740,6 +816,7 @@ vm_page_alloc(unsigned int order, unsigned int selector, unsigned short type)
         page = vm_page_zone_alloc(&vm_page_zones[i], order, type);
 
         if (page != NULL) {
+            assert(!vm_page_block_referenced(page, order));
             return page;
         }
     }
@@ -751,6 +828,7 @@ void
 vm_page_free(struct vm_page *page, unsigned int order)
 {
     assert(page->zone_index < ARRAY_SIZE(vm_page_zones));
+    assert(!vm_page_block_referenced(page, order));
 
     vm_page_zone_free(&vm_page_zones[page->zone_index], page, order);
 }
@@ -759,13 +837,13 @@ const char *
 vm_page_zone_name(unsigned int zone_index)
 {
     /* Don't use a switch statement since zones can be aliased */
-    if (zone_index == VM_PAGE_ZONE_HIGHMEM) {
+    if (zone_index == PMEM_ZONE_HIGHMEM) {
         return "HIGHMEM";
-    } else if (zone_index == VM_PAGE_ZONE_DIRECTMAP) {
+    } else if (zone_index == PMEM_ZONE_DIRECTMAP) {
         return "DIRECTMAP";
-    } else if (zone_index == VM_PAGE_ZONE_DMA32) {
+    } else if (zone_index == PMEM_ZONE_DMA32) {
         return "DMA32";
-    } else if (zone_index == VM_PAGE_ZONE_DMA) {
+    } else if (zone_index == PMEM_ZONE_DMA) {
         return "DMA";
     } else {
         panic("vm_page: invalid zone index");
@@ -773,17 +851,7 @@ vm_page_zone_name(unsigned int zone_index)
 }
 
 void
-vm_page_info(void)
+vm_page_log_info(void)
 {
-    struct vm_page_zone *zone;
-    unsigned long pages;
-    unsigned int i;
-
-    for (i = 0; i < vm_page_zones_size; i++) {
-        zone = &vm_page_zones[i];
-        pages = (unsigned long)(zone->pages_end - zone->pages);
-        printk("vm_page: %s: pages: %lu (%luM), free: %lu (%luM)\n",
-               vm_page_zone_name(i), pages, pages >> (20 - PAGE_SHIFT),
-               zone->nr_free_pages, zone->nr_free_pages >> (20 - PAGE_SHIFT));
-    }
+    vm_page_info_common(log_info);
 }

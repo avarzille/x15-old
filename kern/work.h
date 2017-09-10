@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013 Richard Braun.
+ * Copyright (c) 2013-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,17 +26,12 @@
 #ifndef _KERN_WORK_H
 #define _KERN_WORK_H
 
+#include <kern/init.h>
+
 /*
  * Work scheduling flags.
  */
 #define WORK_HIGHPRIO   0x1 /* Use a high priority worker thread */
-
-struct work;
-
-/*
- * Type for work functions.
- */
-typedef void (*work_fn_t)(struct work *);
 
 /*
  * Deferred work.
@@ -45,19 +40,19 @@ typedef void (*work_fn_t)(struct work *);
  * stores the work function and is passed to it as its only parameter.
  * The function can then find the containing object with the structof macro.
  */
-struct work {
-    struct work *next;
-    work_fn_t fn;
-};
+struct work;
 
 /*
  * Queue of deferred works for batch scheduling.
  */
-struct work_queue {
-    struct work *first;
-    struct work *last;
-    unsigned int nr_works;
-};
+struct work_queue;
+
+/*
+ * Type for work functions.
+ */
+typedef void (*work_fn_t)(struct work *);
+
+#include <kern/work_i.h>
 
 static inline void
 work_queue_init(struct work_queue *queue)
@@ -134,11 +129,6 @@ work_init(struct work *work, work_fn_t fn)
 }
 
 /*
- * Initialize the work module.
- */
-void work_setup(void);
-
-/*
  * Schedule work for deferred processing.
  *
  * This function may be called from interrupt context.
@@ -155,5 +145,12 @@ void work_queue_schedule(struct work_queue *queue, int flags);
  * Interrupts and preemption must be disabled when calling this function.
  */
 void work_report_periodic_event(void);
+
+/*
+ * This init operation provides :
+ *  - works can be scheduled
+ *  - module fully initialized
+ */
+INIT_OP_DECLARE(work_setup);
 
 #endif /* _KERN_WORK_H */

@@ -40,51 +40,69 @@
  * almost everywhere, the latter solution is implemented (a small part of
  * 32-bit code is required until the identity mapping is in place). Mentions
  * to "enabling paging" do not refer to this initial identity mapping.
+ *
+ * TODO EFI support.
  */
 
-#include <stdbool.h>
+#include <stdalign.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
+#include <kern/arg.h>
 #include <kern/init.h>
 #include <kern/kmem.h>
 #include <kern/kernel.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/panic.h>
-#include <kern/param.h>
-#include <kern/percpu.h>
-#include <kern/printk.h>
-#include <kern/sleepq.h>
-#include <kern/sref.h>
-#include <kern/syscnt.h>
 #include <kern/thread.h>
-#include <kern/turnstile.h>
+#include <machine/acpi.h>
+#include <machine/atcons.h>
 #include <machine/biosmem.h>
 #include <machine/boot.h>
 #include <machine/cga.h>
 #include <machine/cpu.h>
 #include <machine/elf.h>
 #include <machine/multiboot.h>
-#include <machine/pic.h>
-#include <machine/pit.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
 #include <machine/strace.h>
-#include <machine/trap.h>
+#include <machine/uart.h>
 #include <vm/vm_kmem.h>
-#include <vm/vm_setup.h>
 
-char boot_stack[STACK_SIZE] __aligned(DATA_ALIGN) __bootdata;
-char boot_ap_stack[STACK_SIZE] __aligned(DATA_ALIGN) __bootdata;
+alignas(CPU_DATA_ALIGN) char boot_stack[BOOT_STACK_SIZE] __bootdata;
+alignas(CPU_DATA_ALIGN) char boot_ap_stack[BOOT_STACK_SIZE] __bootdata;
 unsigned int boot_ap_id __bootdata;
 
 #ifdef __LP64__
-pmap_pte_t boot_pml4[PMAP_L3_PTES_PER_PT] __aligned(PAGE_SIZE) __bootdata;
-pmap_pte_t boot_pdpt[PMAP_L2_PTES_PER_PT] __aligned(PAGE_SIZE) __bootdata;
-pmap_pte_t boot_pdir[4 * PMAP_L1_PTES_PER_PT] __aligned(PAGE_SIZE) __bootdata;
+alignas(PAGE_SIZE) pmap_pte_t boot_pml4[PMAP_L3_PTES_PER_PT] __bootdata;
+alignas(PAGE_SIZE) pmap_pte_t boot_pdpt[PMAP_L2_PTES_PER_PT] __bootdata;
+alignas(PAGE_SIZE) pmap_pte_t boot_pdir[4 * PMAP_L1_PTES_PER_PT] __bootdata;
 char boot_panic_long_mode_msg[] __bootdata
     = "boot: processor doesn't support long mode";
 #endif /* __LP64__ */
+
+struct cpu_tls_seg boot_tls_seg __bootdata = {
+    .ssp_guard_word = SSP_GUARD_WORD,
+};
+
+/*
+ * This TLS segment descriptor is copied early at boot time into the
+ * temporary boot GDT. However, it is incomplete. Assembly code
+ * completes it before writing it into the boot GDT before calling
+ * any C function, since those may require the TLS segment ready if
+ * stack protection is enabled.
+ */
+struct cpu_seg_desc boot_tls_seg_desc __bootdata = {
+    .low = (sizeof(boot_tls_seg) & 0xffff),
+
+    .high = CPU_DESC_DB
+            | ((sizeof(boot_tls_seg) >> 16) & 0xf)
+            | CPU_DESC_PRESENT
+            | CPU_DESC_S
+            | CPU_DESC_TYPE_DATA,
+};
 
 /*
  * Copies of the multiboot data passed by the boot loader.
@@ -92,11 +110,34 @@ char boot_panic_long_mode_msg[] __bootdata
 static struct multiboot_raw_info boot_raw_mbi __bootdata;
 static struct multiboot_info boot_mbi __initdata;
 
+static char boot_tmp_cmdline[ARG_CMDLINE_MAX_SIZE] __bootdata;
+
 static char boot_panic_intro_msg[] __bootdata = "panic: ";
 static char boot_panic_loader_msg[] __bootdata
     = "boot: not started by a multiboot compliant boot loader";
 static char boot_panic_meminfo_msg[] __bootdata
     = "boot: missing basic memory information";
+static char boot_panic_cmdline_msg[] __bootdata
+    = "boot: command line too long";
+
+void * __boot
+boot_memcpy(void *dest, const void *src, size_t n)
+{
+    const char *src_ptr;
+    char *dest_ptr;
+    size_t i;
+
+    dest_ptr = dest;
+    src_ptr = src;
+
+    for (i = 0; i < n; i++) {
+        *dest_ptr = *src_ptr;
+        dest_ptr++;
+        src_ptr++;
+    }
+
+    return dest;
+}
 
 void * __boot
 boot_memmove(void *dest, const void *src, size_t n)
@@ -110,14 +151,18 @@ boot_memmove(void *dest, const void *src, size_t n)
         src_ptr = src;
 
         for (i = 0; i < n; i++) {
-            *dest_ptr++ = *src_ptr++;
+            *dest_ptr = *src_ptr;
+            dest_ptr++;
+            src_ptr++;
         }
     } else {
         dest_ptr = dest + n - 1;
         src_ptr = src + n - 1;
 
         for (i = 0; i < n; i++) {
-            *dest_ptr-- = *src_ptr--;
+            *dest_ptr = *src_ptr;
+            dest_ptr--;
+            src_ptr--;
         }
     }
 
@@ -142,15 +187,15 @@ boot_memset(void *s, int c, size_t n)
 size_t __boot
 boot_strlen(const char *s)
 {
-    size_t i;
+    const char *start;
 
-    i = 0;
+    start = s;
 
-    while (*s++ != '\0') {
-        i++;
+    while (*s != '\0') {
+        s++;
     }
 
-    return i;
+    return (s - start);
 }
 
 void __boot
@@ -165,17 +210,22 @@ boot_panic(const char *msg)
     s = boot_panic_intro_msg;
 
     while ((ptr < end) && (*s != '\0')) {
-        *ptr++ = (BOOT_CGACOLOR << 8) | *s++;
+        *ptr = (BOOT_CGACOLOR << 8) | *s;
+        ptr++;
+        s++;
     }
 
     s = msg;
 
     while ((ptr < end) && (*s != '\0')) {
-        *ptr++ = (BOOT_CGACOLOR << 8) | *s++;
+        *ptr = (BOOT_CGACOLOR << 8) | *s;
+        ptr++;
+        s++;
     }
 
     while (ptr < end) {
-        *ptr++ = (BOOT_CGACOLOR << 8) | ' ';
+        *ptr = (BOOT_CGACOLOR << 8) | ' ';
+        ptr++;
     }
 
     cpu_halt();
@@ -184,14 +234,10 @@ boot_panic(const char *msg)
 }
 
 static void __boot
-boot_save_cmdline_sizes(struct multiboot_raw_info *mbi)
+boot_save_mod_cmdline_sizes(struct multiboot_raw_info *mbi)
 {
     struct multiboot_raw_module *mod;
     uint32_t i;
-
-    if (mbi->flags & MULTIBOOT_LOADER_CMDLINE) {
-        mbi->unused0 = boot_strlen((char *)(uintptr_t)mbi->cmdline) + 1;
-    }
 
     if (mbi->flags & MULTIBOOT_LOADER_MODULES) {
         uintptr_t addr;
@@ -215,10 +261,6 @@ boot_register_data(const struct multiboot_raw_info *mbi)
 
     biosmem_register_boot_data((uintptr_t)&_boot,
                                BOOT_VTOP((uintptr_t)&_end), false);
-
-    if ((mbi->flags & MULTIBOOT_LOADER_CMDLINE) && (mbi->cmdline != 0)) {
-        biosmem_register_boot_data(mbi->cmdline, mbi->cmdline + mbi->unused0, true);
-    }
 
     if (mbi->flags & MULTIBOOT_LOADER_MODULES) {
         i = mbi->mods_count * sizeof(struct multiboot_raw_module);
@@ -273,28 +315,49 @@ boot_setup_paging(struct multiboot_raw_info *mbi, unsigned long eax)
      */
     boot_memmove(&boot_raw_mbi, mbi, sizeof(boot_raw_mbi));
 
+    /*
+     * The kernel command line must be passed as early as possible to the
+     * arg module so that other modules can look up options. Instead of
+     * mapping it later, make a temporary copy.
+     */
+    if (!(mbi->flags & MULTIBOOT_LOADER_CMDLINE)) {
+        boot_tmp_cmdline[0] = '\0';
+    } else {
+        uintptr_t addr;
+        size_t length;
+
+        addr = mbi->cmdline;
+        length = boot_strlen((const char *)addr) + 1;
+
+        if (length > ARRAY_SIZE(boot_tmp_cmdline)) {
+            boot_panic(boot_panic_cmdline_msg);
+        }
+
+        boot_memcpy(boot_tmp_cmdline, (const char *)addr, length);
+    }
+
     if ((mbi->flags & MULTIBOOT_LOADER_MODULES) && (mbi->mods_count == 0)) {
         boot_raw_mbi.flags &= ~MULTIBOOT_LOADER_MODULES;
     }
 
     /*
-     * The kernel and modules command lines will be memory mapped later
-     * during initialization. Their respective sizes must be saved.
+     * The module command lines will be memory mapped later during
+     * initialization. Their respective sizes must be saved.
      */
-    boot_save_cmdline_sizes(&boot_raw_mbi);
+    boot_save_mod_cmdline_sizes(&boot_raw_mbi);
     boot_register_data(&boot_raw_mbi);
     biosmem_bootstrap(&boot_raw_mbi);
     return pmap_setup_paging();
 }
 
-static void __init
-boot_show_version(void)
+void __init
+boot_log_info(void)
 {
-    printk(KERNEL_NAME "/" QUOTE(X15_X86_MACHINE) " " KERNEL_VERSION
+    log_info(KERNEL_NAME "/" QUOTE(X15_X86_SUBARCH) " " KERNEL_VERSION
 #ifdef X15_X86_PAE
-           " PAE"
+             " PAE"
 #endif /* X15_X86_PAE */
-           "\n");
+             );
 }
 
 static void * __init
@@ -409,46 +472,24 @@ boot_save_mods(void)
  * the boot loader. Once the boot data are managed as kernel buffers, their
  * backing pages can be freed.
  */
-static void __init
+static int __init
 boot_save_data(void)
 {
     boot_mbi.flags = boot_raw_mbi.flags;
-
-    if (boot_mbi.flags & MULTIBOOT_LOADER_CMDLINE) {
-        boot_mbi.cmdline = boot_save_memory(boot_raw_mbi.cmdline,
-                                            boot_raw_mbi.unused0);
-    } else {
-        boot_mbi.cmdline = NULL;
-    }
-
     boot_save_mods();
-    strace_setup(&boot_raw_mbi);
+    return 0;
 }
+
+INIT_OP_DEFINE(boot_save_data,
+               INIT_OP_DEP(kmem_setup, true),
+               INIT_OP_DEP(panic_setup, true),
+               INIT_OP_DEP(vm_kmem_setup, true));
 
 void __init
 boot_main(void)
 {
-    sleepq_bootstrap();
-    turnstile_bootstrap();
-    syscnt_setup();
-    percpu_bootstrap();
-    trap_setup();
-    cpu_setup();
-    thread_bootstrap();
-    cga_setup();
-    printk_setup();
-    boot_show_version();
-    pmap_bootstrap();
-    sref_bootstrap();
-    cpu_check(cpu_current());
-    cpu_info(cpu_current());
-    biosmem_setup();
-    vm_setup();
-    boot_save_data();
-    biosmem_free_usable();
-    pic_setup();
-    pit_setup();
-    cpu_mp_probe();
+    arg_set_cmdline(boot_tmp_cmdline);
+    strace_set_mbi(&boot_raw_mbi);
     kernel_main();
 
     /* Never reached */
@@ -458,9 +499,61 @@ void __init
 boot_ap_main(void)
 {
     cpu_ap_setup();
-    thread_ap_bootstrap();
-    pmap_ap_bootstrap();
+    thread_ap_setup();
+    pmap_ap_setup();
     kernel_ap_main();
 
     /* Never reached */
 }
+
+/*
+ * Init operation aliases.
+ */
+
+static int __init
+boot_bootstrap_console(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(boot_bootstrap_console,
+               INIT_OP_DEP(atcons_bootstrap, true),
+               INIT_OP_DEP(uart_bootstrap, true));
+
+static int __init
+boot_setup_console(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(boot_setup_console,
+               INIT_OP_DEP(atcons_setup, true),
+               INIT_OP_DEP(uart_setup, true));
+
+static int __init
+boot_load_vm_page_zones(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(boot_load_vm_page_zones,
+               INIT_OP_DEP(biosmem_setup, true));
+
+static int __init
+boot_setup_intr(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(boot_setup_intr,
+               INIT_OP_DEP(acpi_setup, true));
+
+static int __init
+boot_setup_shutdown(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(boot_setup_shutdown,
+               INIT_OP_DEP(acpi_setup, true),
+               INIT_OP_DEP(cpu_setup_shutdown, true));

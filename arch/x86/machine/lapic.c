@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2014 Richard Braun.
+ * Copyright (c) 2011-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,15 +15,16 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include <kern/clock.h>
 #include <kern/init.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/panic.h>
-#include <kern/param.h>
-#include <kern/printk.h>
-#include <kern/thread.h>
 #include <machine/cpu.h>
 #include <machine/lapic.h>
 #include <machine/pmap.h>
@@ -55,13 +56,9 @@
 #define LAPIC_TIMER_COUNT_MAX   0xffffffff
 
 /*
- * The value of this duration (in microseconds) must be carefully set.
- * It must divide a second (1000000) without loss of precision. It is
- * recommended to use either 1s or 100ms. The former gives the best
- * results, as it renders the time used for accounting operations
- * negligible, but is slightly longer.
+ * Delay used to calibrate the local APIC timer, in microseconds.
  */
-#define LAPIC_TIMER_CAL_DELAY   1000000
+#define LAPIC_TIMER_CAL_DELAY   100000
 
 /*
  * Spurious-interrupt vector register bits.
@@ -199,10 +196,11 @@ lapic_write(volatile struct lapic_register *r, uint32_t value)
 }
 
 static void __init
-lapic_setup_timer(void)
+lapic_compute_freq(void)
 {
     uint32_t c1, c2;
 
+    lapic_write(&lapic_map->svr, LAPIC_SVR_SOFT_EN | TRAP_LAPIC_SPURIOUS);
     lapic_write(&lapic_map->timer_dcr, LAPIC_TIMER_DCR_DIV1);
 
     /* The APIC timer counter should never wrap around here */
@@ -211,9 +209,10 @@ lapic_setup_timer(void)
     cpu_delay(LAPIC_TIMER_CAL_DELAY);
     c2 = lapic_read(&lapic_map->timer_ccr);
     lapic_bus_freq = (c1 - c2) * (1000000 / LAPIC_TIMER_CAL_DELAY);
-    printk("lapic: bus frequency: %u.%02u MHz\n", lapic_bus_freq / 1000000,
-           lapic_bus_freq % 1000000);
-    lapic_write(&lapic_map->timer_icr, lapic_bus_freq / HZ);
+    log_info("lapic: bus frequency: %u.%02u MHz", lapic_bus_freq / 1000000,
+             lapic_bus_freq % 1000000);
+    lapic_write(&lapic_map->timer_icr, lapic_bus_freq / CLOCK_FREQ);
+    lapic_write(&lapic_map->svr, 0);
 }
 
 void
@@ -227,6 +226,7 @@ lapic_setup_registers(void)
 {
     /*
      * LVT mask bits can only be cleared when the local APIC is enabled.
+     * They are kept disabled while the local APIC is disabled.
      */
     lapic_write(&lapic_map->svr, LAPIC_SVR_SOFT_EN | TRAP_LAPIC_SPURIOUS);
     lapic_write(&lapic_map->tpr, 0);
@@ -238,7 +238,7 @@ lapic_setup_registers(void)
     lapic_write(&lapic_map->lvt_lint1, LAPIC_LVT_MASK_INTR);
     lapic_write(&lapic_map->lvt_error, TRAP_LAPIC_ERROR);
     lapic_write(&lapic_map->timer_dcr, LAPIC_TIMER_DCR_DIV1);
-    lapic_write(&lapic_map->timer_icr, lapic_bus_freq / HZ);
+    lapic_write(&lapic_map->timer_icr, lapic_bus_freq / CLOCK_FREQ);
 }
 
 void __init
@@ -258,8 +258,8 @@ lapic_setup(uint32_t map_addr)
         panic("lapic: external local APIC not supported");
     }
 
+    lapic_compute_freq();
     lapic_setup_registers();
-    lapic_setup_timer();
 }
 
 void __init
@@ -333,7 +333,7 @@ lapic_timer_intr(struct trap_frame *frame)
     (void)frame;
 
     lapic_eoi();
-    thread_tick_intr();
+    clock_tick_intr();
 }
 
 void
@@ -343,7 +343,7 @@ lapic_error_intr(struct trap_frame *frame)
 
     (void)frame;
     esr = lapic_read(&lapic_map->esr);
-    printk("lapic: error on cpu%u: esr:%08x\n", cpu_id(), esr);
+    log_err("lapic: error on cpu%u: esr:%08x", cpu_id(), esr);
     lapic_write(&lapic_map->esr, 0);
     lapic_eoi();
 }
@@ -352,7 +352,7 @@ void
 lapic_spurious_intr(struct trap_frame *frame)
 {
     (void)frame;
-    printk("lapic: warning: spurious interrupt\n");
+    log_warning("lapic: spurious interrupt");
 
     /* No EOI for this interrupt */
 }

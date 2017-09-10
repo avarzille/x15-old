@@ -18,11 +18,20 @@
 #ifndef _KERN_PANIC_H
 #define _KERN_PANIC_H
 
-#include <kern/macros.h>
+#include <stdnoreturn.h>
+
+#include <kern/init.h>
 
 /*
  * Print the given message and halt the system immediately.
  */
-void __noreturn panic(const char *format, ...) __format_printf(1, 2);
+noreturn void panic(const char *format, ...)
+    __attribute__((format(printf, 1, 2)));
+
+/*
+ * This init operation provides :
+ *  - module fully initialized
+ */
+INIT_OP_DECLARE(panic_setup);
 
 #endif /* _KERN_PANIC_H */

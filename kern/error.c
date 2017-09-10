@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014 Richard Braun.
+ * Copyright (c) 2014-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -14,6 +14,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+#include <stddef.h>
 
 #include <kern/error.h>
 #include <kern/panic.h>
@@ -33,7 +35,17 @@ error_str(int error)
     case ERROR_BUSY:
         return "device or resource busy";
     case ERROR_FAULT:
-        return "Bad address";
+        return "bad address";
+    case ERROR_NODEV:
+        return "no such device";
+    case ERROR_EXIST:
+        return "entry exists";
+    case ERROR_IO:
+        return "input/output error";
+    case ERROR_SRCH:
+        return "no such process";
+    case ERROR_TIMEDOUT:
+        return "timeout error";
     default:
         return "unknown error";
     }

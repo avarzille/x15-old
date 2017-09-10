@@ -30,18 +30,14 @@
 typedef void (*xcall_fn_t)(void *arg);
 
 /*
- * Initialize the xcall module.
- */
-void xcall_setup(void);
-
-/*
  * Run the given cross-call function on a specific processor.
  *
  * The operation is completely synchronous, returning only when the function
  * has finished running on the target processor, with the side effects of
  * the function visible.
  *
- * The function is run in interrupt context.
+ * The function is run in interrupt context. Interrupts must be enabled
+ * when calling this function.
  */
 void xcall_call(xcall_fn_t fn, void *arg, unsigned int cpu);
 

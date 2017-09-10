@@ -18,11 +18,12 @@
 #ifndef _KERN_KMEM_I_H
 #define _KERN_KMEM_I_H
 
+#include <stdalign.h>
 #include <stddef.h>
 
 #include <kern/list.h>
 #include <kern/mutex.h>
-#include <kern/param.h>
+#include <machine/cpu.h>
 
 /*
  * Per-processor cache of pre-constructed objects.
@@ -30,13 +31,13 @@
  * The flags member is a read-only CPU-local copy of the parent cache flags.
  */
 struct kmem_cpu_pool {
-    struct mutex lock;
+    alignas(CPU_L1_SIZE) struct mutex lock;
     int flags;
     int size;
     int transfer_size;
     int nr_objs;
     void **array;
-} __aligned(CPU_L1_SIZE);
+};
 
 /*
  * When a cache is created, its CPU pool type is determined from the buffer
@@ -70,17 +71,17 @@ union kmem_bufctl {
  * Redzone guard word.
  */
 #ifdef __LP64__
-#ifdef __BIG_ENDIAN__
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define KMEM_REDZONE_WORD 0xfeedfacefeedfaceUL
-#else /* __BIG_ENDIAN__ */
+#else /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #define KMEM_REDZONE_WORD 0xcefaedfecefaedfeUL
-#endif /* __BIG_ENDIAN__ */
+#endif /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #else /* __LP64__ */
-#ifdef __BIG_ENDIAN__
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define KMEM_REDZONE_WORD 0xfeedfaceUL
-#else /* __BIG_ENDIAN__ */
+#else /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #define KMEM_REDZONE_WORD 0xcefaedfeUL
-#endif /* __BIG_ENDIAN__ */
+#endif /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #endif /* __LP64__ */
 
 /*
@@ -104,21 +105,21 @@ struct kmem_buftag {
  * Values the buftag state member can take.
  */
 #ifdef __LP64__
-#ifdef __BIG_ENDIAN__
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define KMEM_BUFTAG_ALLOC   0xa110c8eda110c8edUL
 #define KMEM_BUFTAG_FREE    0xf4eeb10cf4eeb10cUL
-#else /* __BIG_ENDIAN__ */
+#else /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #define KMEM_BUFTAG_ALLOC   0xedc810a1edc810a1UL
 #define KMEM_BUFTAG_FREE    0x0cb1eef40cb1eef4UL
-#endif /* __BIG_ENDIAN__ */
+#endif /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #else /* __LP64__ */
-#ifdef __BIG_ENDIAN__
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define KMEM_BUFTAG_ALLOC   0xa110c8edUL
 #define KMEM_BUFTAG_FREE    0xf4eeb10cUL
-#else /* __BIG_ENDIAN__ */
+#else /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #define KMEM_BUFTAG_ALLOC   0xedc810a1UL
 #define KMEM_BUFTAG_FREE    0x0cb1eef4UL
-#endif /* __BIG_ENDIAN__ */
+#endif /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #endif /* __LP64__ */
 
 /*
@@ -127,13 +128,13 @@ struct kmem_buftag {
  * These values are unconditionally 64-bit wide since buffers are at least
  * 8-byte aligned.
  */
-#ifdef __BIG_ENDIAN__
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
 #define KMEM_FREE_PATTERN   0xdeadbeefdeadbeefULL
 #define KMEM_UNINIT_PATTERN 0xbaddcafebaddcafeULL
-#else /* __BIG_ENDIAN__ */
+#else /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 #define KMEM_FREE_PATTERN   0xefbeaddeefbeaddeULL
 #define KMEM_UNINIT_PATTERN 0xfecaddbafecaddbaULL
-#endif /* __BIG_ENDIAN__ */
+#endif /* __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__ */
 
 /*
  * Page-aligned collection of unconstructed buffers.

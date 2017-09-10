@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 Richard Braun.
+ * Copyright (c) 2012-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,11 +18,16 @@
 #ifndef _KERN_ERROR_H
 #define _KERN_ERROR_H
 
-#define ERROR_NOMEM 1
-#define ERROR_AGAIN 2
-#define ERROR_INVAL 3
-#define ERROR_BUSY  4
-#define ERROR_FAULT 5
+#define ERROR_NOMEM     1
+#define ERROR_AGAIN     2
+#define ERROR_INVAL     3
+#define ERROR_BUSY      4
+#define ERROR_FAULT     5
+#define ERROR_NODEV     6
+#define ERROR_EXIST     7
+#define ERROR_IO        8
+#define ERROR_SRCH      9
+#define ERROR_TIMEDOUT  10
 
 /*
  * Return a string describing the given error.

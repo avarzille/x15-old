@@ -18,10 +18,10 @@
 #ifndef _KERN_RTMUTEX_I_H
 #define _KERN_RTMUTEX_I_H
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <kern/assert.h>
 #include <kern/atomic.h>
 #include <kern/rtmutex_types.h>
 #include <kern/thread.h>
@@ -51,7 +51,7 @@
     assert(((owner) & ~RTMUTEX_OWNER_MASK) == 0)
 
 static inline uintptr_t
-rtmutex_tryacquire(struct rtmutex *rtmutex)
+rtmutex_lock_fast(struct rtmutex *rtmutex)
 {
     uintptr_t owner;
 
@@ -61,7 +61,7 @@ rtmutex_tryacquire(struct rtmutex *rtmutex)
 }
 
 static inline uintptr_t
-rtmutex_tryrelease(struct rtmutex *rtmutex)
+rtmutex_unlock_fast(struct rtmutex *rtmutex)
 {
     uintptr_t owner, prev_owner;
 
@@ -73,6 +73,8 @@ rtmutex_tryrelease(struct rtmutex *rtmutex)
 }
 
 void rtmutex_lock_slow(struct rtmutex *rtmutex);
+
+int rtmutex_timedlock_slow(struct rtmutex *rtmutex, uint64_t ticks);
 
 void rtmutex_unlock_slow(struct rtmutex *rtmutex);
 

@@ -15,14 +15,17 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdio.h>
 #include <string.h>
 
+#include <kern/atomic.h>
 #include <kern/init.h>
 #include <kern/list.h>
 #include <kern/mutex.h>
-#include <kern/printk.h>
+#include <kern/shell.h>
 #include <kern/spinlock.h>
 #include <kern/syscnt.h>
+#include <kern/thread.h>
 
 /*
  * Global list of all registered counters.
@@ -30,19 +33,57 @@
 static struct list syscnt_list;
 static struct mutex syscnt_lock;
 
-void __init
+#ifdef X15_ENABLE_SHELL
+
+static void
+syscnt_shell_info(int argc, char **argv)
+{
+    char *prefix;
+
+    prefix = (argc >= 2) ? argv[1] : NULL;
+    syscnt_info(prefix);
+}
+
+static struct shell_cmd syscnt_shell_cmds[] = {
+    SHELL_CMD_INITIALIZER("syscnt_info", syscnt_shell_info,
+                          "syscnt_info [<prefix>]",
+                          "display information about system counters"),
+};
+
+static int __init
+syscnt_setup_shell(void)
+{
+    SHELL_REGISTER_CMDS(syscnt_shell_cmds);
+    return 0;
+}
+
+INIT_OP_DEFINE(syscnt_setup_shell,
+               INIT_OP_DEP(shell_setup, true),
+               INIT_OP_DEP(syscnt_setup, true));
+
+#endif /* X15_ENABLE_SHELL */
+
+static int __init
 syscnt_setup(void)
 {
     list_init(&syscnt_list);
     mutex_init(&syscnt_lock);
+    return 0;
 }
+
+/*
+ * Do not make initialization depend on mutex_setup, since mutex
+ * modules may use system counters for debugging.
+ */
+INIT_OP_DEFINE(syscnt_setup,
+               INIT_OP_DEP(thread_setup_booter, true));
 
 void __init
 syscnt_register(struct syscnt *syscnt, const char *name)
 {
-#ifndef ARCH_HAVE_64B_ATOMIC
+#ifndef ATOMIC_HAVE_64B_OPS
     spinlock_init(&syscnt->lock);
-#endif /* __LP64__ */
+#endif
     syscnt->value = 0;
     strlcpy(syscnt->name, name, sizeof(syscnt->name));
 
@@ -60,8 +101,6 @@ syscnt_info(const char *prefix)
 
     prefix_length = (prefix == NULL) ? 0 : strlen(prefix);
 
-    printk("syscnt: name                                       value\n");
-
     mutex_lock(&syscnt_lock);
 
     list_for_each_entry(&syscnt_list, syscnt, node) {
@@ -76,7 +115,7 @@ syscnt_info(const char *prefix)
 
         value = syscnt_read(syscnt);
 
-        printk("syscnt: %-30s %17llu\n", syscnt->name,
+        printf("syscnt: %40s %20llu\n", syscnt->name,
                (unsigned long long)value);
     }
 

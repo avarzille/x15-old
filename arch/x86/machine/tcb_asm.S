@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012, 2013 Richard Braun.
+ * Copyright (c) 2012-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,24 +24,18 @@
 #ifdef __LP64__
 
 ASM_ENTRY(tcb_context_load)
- movq (%rdi), %rbp
- movq 8(%rdi), %rsp
- movq 16(%rdi), %rax
- pushq $CPU_EFL_ONE
- popfq
- jmp *%rax
+ movq (%rdi), %rbp          /* load frame pointer from TCB */
+ movq 8(%rdi), %rsp         /* load stack pointer from TCB */
+ jmp tcb_context_restore
 ASM_END(tcb_context_load)
 
 #else /* __LP64__ */
 
 ASM_ENTRY(tcb_context_load)
- movl 4(%esp), %eax
- movl (%eax), %ebp
- movl 4(%eax), %esp
- movl 8(%eax), %ecx
- pushl $CPU_EFL_ONE
- popfl
- jmp *%ecx
+ movl 4(%esp), %eax         /* load TCB address */
+ movl (%eax), %ebp          /* load frame pointer from TCB */
+ movl 4(%eax), %esp         /* load stack pointer from TCB */
+ jmp tcb_context_restore
 ASM_END(tcb_context_load)
 
 #endif /* __LP64__ */
@@ -51,30 +45,39 @@ ASM_END(tcb_context_load)
 #ifdef __LP64__
 
 ASM_ENTRY(tcb_start)
- popq %rax
- call *%rax
+ popq %rdi              /* load function */
+ popq %rsi              /* load argument */
+
+ /*
+  * Use the call instruction to start a clean stack trace.
+  *
+  * Note that, on amd64, the stack must be 16-byte before the call
+  * instruction, so that "$(rsp + 8) is a multiple is always a multiple
+  * of 16 when control is transferred to the function entry point",
+  * which is another reason to use call instead of a bare jump.
+  */
+ call thread_main
 
  /* Never reached */
- nop
+ nop                    /* make the return address point to an instruction
+                           inside the function to build a clean stack trace */
 ASM_END(tcb_start)
 
 ASM_ENTRY(tcb_context_switch)
- pushfq
+ pushfq                 /* store registers as required by ABI */
  pushq %rbx
  pushq %r12
  pushq %r13
  pushq %r14
  pushq %r15
- movq %rbp, (%rdi)
- movq %rsp, 8(%rdi)
- movq $1f, 16(%rdi)
- movq (%rsi), %rbp
- movq 8(%rsi), %rsp
- movq 16(%rsi), %rax
- jmp *%rax
+ movq %rbp, (%rdi)      /* store frame pointer into prev TCB */
+ movq %rsp, 8(%rdi)     /* store stack pointer into prev TCB */
+ movq (%rsi), %rbp      /* load frame pointer from next TCB */
+ movq 8(%rsi), %rsp     /* load stack pointer from next TCB */
 
-1:
- popq %r15
+.global tcb_context_restore
+tcb_context_restore:
+ popq %r15              /* load registers as required by ABI */
  popq %r14
  popq %r13
  popq %r12
@@ -86,29 +89,34 @@ ASM_END(tcb_context_switch)
 #else /* __LP64__ */
 
 ASM_ENTRY(tcb_start)
- popl %eax
- call *%eax
+ call thread_main       /* the stack already contains the expected arguments
+                           in the expected order, use the call instruction to
+                           start a clean stack trace */
 
  /* Never reached */
- nop
+ nop                    /* make the return address point to an instruction
+                           inside the function to build a clean stack trace */
 ASM_END(tcb_start)
 
 ASM_ENTRY(tcb_context_switch)
- movl 4(%esp), %eax
- movl 8(%esp), %ecx
- pushfl
+ movl 4(%esp), %eax     /* load prev TCB address */
+ movl 8(%esp), %ecx     /* load next TCB address */
+ pushfl                 /* store registers as required by ABI */
  pushl %ebx
  pushl %edi
  pushl %esi
- movl %ebp, (%eax)
- movl %esp, 4(%eax)
- movl $1f, 8(%eax)
- movl (%ecx), %ebp
- movl 4(%ecx), %esp
- movl 8(%ecx), %edx
- jmp *%edx
+ movl %ebp, (%eax)      /* store frame pointer into prev TCB */
+ movl %esp, 4(%eax)     /* store stack pointer into prev TCB */
+ movl (%ecx), %ebp      /* load frame pointer from next TCB */
+ movl 4(%ecx), %esp     /* load stack pointer from next TCB */
 
-1:
+/*
+ * This code is run on context restoration. The frame and stack pointers
+ * have already been loaded to their correct values. Load registers which
+ * were stored on the stack when the context was saved and return.
+ */
+.global tcb_context_restore
+tcb_context_restore:
  popl %esi
  popl %edi
  popl %ebx

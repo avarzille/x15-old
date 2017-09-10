@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014 Richard Braun.
+ * Copyright (c) 2012-2017 Richard Braun.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,43 +15,85 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <stdnoreturn.h>
+
 #include <kern/init.h>
-#include <kern/macros.h>
-#include <kern/param.h>
 #include <kern/thread.h>
 #include <machine/cpu.h>
 #include <machine/pmap.h>
 #include <machine/strace.h>
 #include <machine/tcb.h>
 
-/*
- * Low level functions.
- */
-void __noreturn tcb_context_load(struct tcb *tcb);
-void __noreturn tcb_start(void);
+noreturn void tcb_context_load(struct tcb *tcb);
+noreturn void tcb_start(void);
+void tcb_context_restore(void);
 
 struct tcb *tcb_current_ptr __percpu;
 
-int
-tcb_init(struct tcb *tcb, void *stack, void (*fn)(void))
+static void
+tcb_stack_push(struct tcb *tcb, uintptr_t word)
 {
-    void **ptr;
+    uintptr_t *ptr;
+
+    ptr = (uintptr_t *)tcb->sp;
+    ptr--;
+    *ptr = word;
+    tcb->sp = (uintptr_t)ptr;
+}
+
+#ifdef __LP64__
+
+static void
+tcb_stack_forge(struct tcb *tcb, void (*fn)(void *), void *arg)
+{
+    tcb_stack_push(tcb, (uintptr_t)arg);
+    tcb_stack_push(tcb, (uintptr_t)fn);
+    tcb_stack_push(tcb, (uintptr_t)tcb_start);  /* Return address */
+    tcb_stack_push(tcb, CPU_EFL_ONE);           /* RFLAGS */
+    tcb_stack_push(tcb, 0);                     /* RBX */
+    tcb_stack_push(tcb, 0);                     /* R12 */
+    tcb_stack_push(tcb, 0);                     /* R13 */
+    tcb_stack_push(tcb, 0);                     /* R14 */
+    tcb_stack_push(tcb, 0);                     /* R15 */
+}
+
+#else /* __LP64__ */
+
+static void
+tcb_stack_forge(struct tcb *tcb, void (*fn)(void *), void *arg)
+{
+    tcb_stack_push(tcb, (uintptr_t)arg);
+    tcb_stack_push(tcb, (uintptr_t)fn);
+    tcb_stack_push(tcb, (uintptr_t)tcb_start);  /* Return address */
+    tcb_stack_push(tcb, CPU_EFL_ONE);           /* EFLAGS */
+    tcb_stack_push(tcb, 0);                     /* EBX */
+    tcb_stack_push(tcb, 0);                     /* EDI */
+    tcb_stack_push(tcb, 0);                     /* ESI */
+}
+
+#endif /* __LP64__ */
+
+int
+tcb_build(struct tcb *tcb, void *stack, void (*fn)(void *), void *arg)
+{
     int error;
 
-    error = pmap_thread_init(thread_from_tcb(tcb));
+    error = pmap_thread_build(thread_from_tcb(tcb));
 
     if (error) {
         return error;
     }
 
     tcb->bp = 0;
-    tcb->sp = (unsigned long)stack + STACK_SIZE - sizeof(unsigned long);
-    tcb->ip = (unsigned long)tcb_start;
-
-    ptr = (void **)tcb->sp;
-    *ptr = fn;
-
+    tcb->sp = (uintptr_t)stack + TCB_STACK_SIZE;
+    tcb_stack_forge(tcb, fn, arg);
     return 0;
+}
+
+void
+tcb_cleanup(struct tcb *tcb)
+{
+    pmap_thread_cleanup(thread_from_tcb(tcb));
 }
 
 void __init
@@ -66,5 +108,14 @@ tcb_load(struct tcb *tcb)
 void
 tcb_trace(const struct tcb *tcb)
 {
-    strace_show(tcb->ip, tcb->bp);
+    strace_show((uintptr_t)tcb_context_restore, tcb->bp);
 }
+
+static int __init
+tcb_setup(void)
+{
+    return 0;
+}
+
+INIT_OP_DEFINE(tcb_setup,
+               INIT_OP_DEP(cpu_setup, true));

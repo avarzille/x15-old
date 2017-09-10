@@ -15,21 +15,20 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
+#include <stdalign.h>
 #include <stddef.h>
 
-#include <kern/assert.h>
 #include <kern/bitmap.h>
 #include <kern/error.h>
 #include <kern/init.h>
 #include <kern/kmem.h>
 #include <kern/list.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/panic.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
-#include <kern/printk.h>
 #include <kern/spinlock.h>
-#include <kern/sprintf.h>
 #include <kern/syscnt.h>
 #include <kern/thread.h>
 #include <kern/work.h>
@@ -86,7 +85,7 @@ struct work_thread {
  * only use one queue.
  */
 struct work_pool {
-    struct spinlock lock;
+    alignas(CPU_L1_SIZE) struct spinlock lock;
     int flags;
     struct work_queue queue0;
     struct work_queue queue1;
@@ -99,7 +98,7 @@ struct work_pool {
     struct list available_threads;
     struct list dead_threads;
     BITMAP_DECLARE(bitmap, WORK_MAX_THREADS);
-} __aligned(CPU_L1_SIZE);
+};
 
 static int work_thread_create(struct work_pool *pool, unsigned int id);
 static void work_thread_destroy(struct work_thread *worker);
@@ -218,8 +217,7 @@ work_pool_acquire(struct work_pool *pool, unsigned long *flags)
     if (pool->flags & WORK_PF_GLOBAL) {
         spinlock_lock_intr_save(&pool->lock, flags);
     } else {
-        thread_preempt_disable();
-        cpu_intr_save(flags);
+        thread_preempt_disable_intr_save(flags);
     }
 }
 
@@ -229,8 +227,7 @@ work_pool_release(struct work_pool *pool, unsigned long flags)
     if (pool->flags & WORK_PF_GLOBAL) {
         spinlock_unlock_intr_restore(&pool->lock, flags);
     } else {
-        cpu_intr_restore(flags);
-        thread_preempt_enable();
+        thread_preempt_enable_intr_restore(flags);
     }
 }
 
@@ -260,7 +257,7 @@ work_pool_wakeup_manager(struct work_pool *pool)
         return;
     }
 
-    if ((pool->manager != NULL) && (pool->manager->thread != thread_self())) {
+    if (pool->manager != NULL) {
         thread_wakeup(pool->manager->thread);
     }
 }
@@ -375,7 +372,7 @@ work_process(void *arg)
 
                 if (error) {
                     work_pool_free_id(pool, id);
-                    printk("work: warning: unable to create worker thread\n");
+                    log_warning("work: unable to create worker thread");
                 }
             }
         }
@@ -473,7 +470,7 @@ work_thread_destroy(struct work_thread *worker)
     kmem_cache_free(&work_thread_cache, worker);
 }
 
-void __init
+static int __init
 work_setup(void)
 {
     unsigned int i;
@@ -491,10 +488,21 @@ work_setup(void)
     work_pool_init(&work_pool_highprio, WORK_INVALID_CPU,
                    WORK_PF_GLOBAL | WORK_PF_HIGHPRIO);
 
-    printk("work: threads per pool (per-cpu/global): %u/%u, spare: %u\n",
-           percpu_var(work_pool_cpu_main.max_threads, 0),
-           work_pool_main.max_threads, WORK_THREADS_SPARE);
+    log_info("work: threads per pool (per-cpu/global): %u/%u, spare: %u",
+             percpu_var(work_pool_cpu_main.max_threads, 0),
+             work_pool_main.max_threads, WORK_THREADS_SPARE);
+
+    return 0;
 }
+
+INIT_OP_DEFINE(work_setup,
+               INIT_OP_DEP(cpu_mp_probe, true),
+               INIT_OP_DEP(kmem_setup, true),
+               INIT_OP_DEP(log_setup, true),
+               INIT_OP_DEP(panic_setup, true),
+               INIT_OP_DEP(spinlock_setup, true),
+               INIT_OP_DEP(syscnt_setup, true),
+               INIT_OP_DEP(thread_bootstrap, true));
 
 void
 work_schedule(struct work *work, int flags)
@@ -529,8 +537,7 @@ work_report_periodic_event(void)
 {
     struct work_queue queue, highprio_queue;
 
-    assert(!cpu_intr_enabled());
-    assert(!thread_preempt_enabled());
+    assert(thread_check_intr_context());
 
     work_pool_shift_queues(cpu_local_ptr(work_pool_cpu_main), &queue);
     work_pool_shift_queues(cpu_local_ptr(work_pool_cpu_highprio),

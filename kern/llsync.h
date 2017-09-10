@@ -38,8 +38,8 @@
  * supported architectures must guarantee that, when updating a word, and
  * in turn a pointer, other processors reading that word obtain a valid
  * value, that is either the previous or the next value of the word, but not
- * a mixed-up value. The llsync module provides the llsync_assign_ptr() and
- * llsync_read_ptr() wrappers that take care of low level details such as
+ * a mixed-up value. The llsync module provides the llsync_store_ptr() and
+ * llsync_load_ptr() wrappers that take care of low level details such as
  * compiler and memory barriers, so that objects are completely built and
  * consistent when published and accessed.
  *
@@ -72,27 +72,21 @@
 
 #include <stdbool.h>
 
+#include <kern/atomic.h>
 #include <kern/macros.h>
 #include <kern/llsync_i.h>
 #include <kern/thread.h>
 #include <kern/work.h>
-#include <machine/mb.h>
 
 /*
- * Safely assign a pointer.
+ * Safely store a pointer.
  */
-#define llsync_assign_ptr(ptr, value)   \
-MACRO_BEGIN                             \
-    mb_store();                         \
-    (ptr) = (value);                    \
-MACRO_END
+#define llsync_store_ptr(ptr, value) atomic_store(&(ptr), value, ATOMIC_RELEASE)
 
 /*
- * Safely access a pointer.
- *
- * No memory barrier, rely on data dependency to enforce ordering.
+ * Safely load a pointer.
  */
-#define llsync_read_ptr(ptr) (ptr)
+#define llsync_load_ptr(ptr) atomic_load(&(ptr), ATOMIC_CONSUME)
 
 /*
  * Read-side critical section enter/exit functions.
@@ -127,11 +121,6 @@ llsync_read_exit(void)
  * Return true if the llsync module is initialized, false otherwise.
  */
 bool llsync_ready(void);
-
-/*
- * Initialize the llsync module.
- */
-void llsync_setup(void);
 
 /*
  * Manage registration of the current processor.

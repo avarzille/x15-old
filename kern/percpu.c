@@ -15,18 +15,17 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#include <kern/assert.h>
 #include <kern/error.h>
 #include <kern/init.h>
+#include <kern/log.h>
 #include <kern/macros.h>
 #include <kern/panic.h>
-#include <kern/param.h>
 #include <kern/percpu.h>
-#include <kern/printk.h>
 #include <machine/cpu.h>
 #include <vm/vm_kmem.h>
 #include <vm/vm_page.h>
@@ -37,25 +36,28 @@ static void *percpu_area_content __initdata;
 static size_t percpu_area_size __initdata;
 static int percpu_skip_warning __initdata;
 
-void __init
+static int __init
 percpu_bootstrap(void)
 {
     percpu_areas[0] = &_percpu;
+    return 0;
 }
 
-void __init
+INIT_OP_DEFINE(percpu_bootstrap);
+
+static int __init
 percpu_setup(void)
 {
     struct vm_page *page;
     unsigned int order;
 
-    percpu_area_size = &_epercpu - &_percpu;
-    printk("percpu: max_cpus: %u, section size: %zuk\n", X15_MAX_CPUS,
-           percpu_area_size >> 10);
+    percpu_area_size = &_percpu_end - &_percpu;
+    log_info("percpu: max_cpus: %u, section size: %zuk", X15_MAX_CPUS,
+             percpu_area_size >> 10);
     assert(vm_page_aligned(percpu_area_size));
 
     if (percpu_area_size == 0) {
-        return;
+        return 0;
     }
 
     order = vm_page_order(percpu_area_size);
@@ -67,7 +69,12 @@ percpu_setup(void)
 
     percpu_area_content = vm_page_direct_ptr(page);
     memcpy(percpu_area_content, &_percpu, percpu_area_size);
+    return 0;
 }
+
+INIT_OP_DEFINE(percpu_setup,
+               INIT_OP_DEP(percpu_bootstrap, true),
+               INIT_OP_DEP(vm_page_setup, true));
 
 int __init
 percpu_add(unsigned int cpu)
@@ -77,8 +84,8 @@ percpu_add(unsigned int cpu)
 
     if (cpu >= ARRAY_SIZE(percpu_areas)) {
         if (!percpu_skip_warning) {
-            printk("percpu: ignoring processor beyond id %zu\n",
-                   ARRAY_SIZE(percpu_areas) - 1);
+            log_warning("percpu: ignoring processor beyond id %zu",
+                        ARRAY_SIZE(percpu_areas) - 1);
             percpu_skip_warning = 1;
         }
 
@@ -86,7 +93,7 @@ percpu_add(unsigned int cpu)
     }
 
     if (percpu_areas[cpu] != NULL) {
-        printk("percpu: error: id %u ignored, already registered\n", cpu);
+        log_err("percpu: id %u ignored, already registered", cpu);
         return ERROR_INVAL;
     }
 
@@ -98,7 +105,7 @@ percpu_add(unsigned int cpu)
     page = vm_page_alloc(order, VM_PAGE_SEL_DIRECTMAP, VM_PAGE_KERNEL);
 
     if (page == NULL) {
-        printk("percpu: error: unable to allocate percpu area\n");
+        log_err("percpu: unable to allocate percpu area");
         return ERROR_NOMEM;
     }
 
@@ -109,7 +116,7 @@ out:
     return 0;
 }
 
-void
+static int __init
 percpu_cleanup(void)
 {
     struct vm_page *page;
@@ -118,4 +125,10 @@ percpu_cleanup(void)
     va = (uintptr_t)percpu_area_content;
     page = vm_page_lookup(vm_page_direct_pa(va));
     vm_page_free(page, vm_page_order(percpu_area_size));
+    return 0;
 }
+
+INIT_OP_DEFINE(percpu_cleanup,
+               INIT_OP_DEP(cpu_mp_probe, true),
+               INIT_OP_DEP(percpu_setup, true),
+               INIT_OP_DEP(vm_page_setup, true));

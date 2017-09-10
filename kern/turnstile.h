@@ -28,7 +28,9 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
+#include <kern/init.h>
 #include <kern/plist.h>
 #include <kern/spinlock.h>
 #include <kern/thread.h>
@@ -40,8 +42,6 @@ struct turnstile;
  * Turnstile thread data.
  */
 struct turnstile_td;
-
-#define turnstile_td_assert_lock(td) spinlock_assert_locked(&(td)->lock)
 
 /*
  * Initialize turnstile thread data.
@@ -59,6 +59,12 @@ turnstile_td_init(struct turnstile_td *td)
 /*
  * Turnstile thread data locking functions.
  */
+
+static inline bool
+turnstile_td_locked(struct turnstile_td *td)
+{
+    return spinlock_locked(&(td)->lock);
+}
 
 static inline void
 turnstile_td_lock(struct turnstile_td *td)
@@ -99,20 +105,6 @@ turnstile_td_get_turnstile(const struct turnstile_td *td)
  * Propagate priority starting at the thread containing the given thread data.
  */
 void turnstile_td_propagate_priority(struct turnstile_td *td);
-
-/*
- * Early initialization of the turnstile module.
- *
- * This module is initialized by architecture-specific code. It should
- * be one of the first modules to be initialized since it's used by
- * synchronization objects that may be accessed very early.
- */
-void turnstile_bootstrap(void);
-
-/*
- * Initialize the turnstile module.
- */
-void turnstile_setup(void);
 
 /*
  * Create/destroy a turnstile.
@@ -170,9 +162,17 @@ bool turnstile_empty(const struct turnstile *turnstile);
  * the associated synchronization object. The priority of the caller
  * is propagated to the chain of turnstiles and owners as necessary
  * to prevent unbounded priority inversion.
+ *
+ * When bounding the duration of the wait, the caller must pass an absolute
+ * time in ticks, and ERROR_TIMEDOUT is returned if that time is reached
+ * before the turnstile is signalled. In addition, if a timeout occurs,
+ * the calling thread temporarily releases the turnstile before returning,
+ * causing other threads to consider the turnstile as empty.
  */
 void turnstile_wait(struct turnstile *turnstile, const char *wchan,
                     struct thread *owner);
+int turnstile_timedwait(struct turnstile *turnstile, const char *wchan,
+                        struct thread *owner, uint64_t ticks);
 
 /*
  * Wake up a thread waiting on the given turnstile, if any.
@@ -188,13 +188,19 @@ void turnstile_signal(struct turnstile *turnstile);
  * Own/disown a turnstile.
  *
  * The turnstile must be lent when taking ownership, acquired when
- * releasing it. Owning has no effect on empty turnstiles.
- * Conversely, an empty turnstile cannot be disowned.
+ * releasing it.
  *
  * Ownership must be updated atomically with regard to the ownership
  * of the associated synchronization object.
  */
 void turnstile_own(struct turnstile *turnstile);
 void turnstile_disown(struct turnstile *turnstile);
+
+/*
+ * This init operation provides :
+ *  - turnstile creation
+ *  - module fully initialized
+ */
+INIT_OP_DECLARE(turnstile_setup);
 
 #endif /* _KERN_TURNSTILE_H */

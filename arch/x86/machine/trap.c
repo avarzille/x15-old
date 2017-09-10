@@ -19,11 +19,15 @@
  * additional configuration and resources to be properly handled.
  */
 
-#include <kern/assert.h>
+#include <assert.h>
+#include <stdalign.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include <kern/atomic.h>
 #include <kern/init.h>
 #include <kern/macros.h>
-#include <kern/param.h>
-#include <kern/printk.h>
+#include <kern/spinlock.h>
 #include <kern/thread.h>
 #include <machine/cpu.h>
 #include <machine/lapic.h>
@@ -32,11 +36,16 @@
 #include <machine/strace.h>
 #include <machine/trap.h>
 
+struct trap_cpu_data {
+    alignas(CPU_DATA_ALIGN) unsigned char intr_stack[TRAP_STACK_SIZE];
+};
+
+static struct trap_cpu_data trap_cpu_data __percpu;
+
 /*
  * Type for interrupt service routines and trap handler functions.
  */
 typedef void (*trap_isr_fn_t)(void);
-typedef void (*trap_handler_fn_t)(struct trap_frame *);
 
 /*
  * Trap handler flags.
@@ -52,58 +61,44 @@ struct trap_handler {
 };
 
 /*
- * Low level interrupt service routines.
+ * Table of ISR addresses.
  */
-void trap_isr_default(void);
-void trap_isr_divide_error(void);
-void trap_isr_debug(void);
-void trap_isr_nmi(void);
-void trap_isr_breakpoint(void);
-void trap_isr_overflow(void);
-void trap_isr_bound_range(void);
-void trap_isr_invalid_opcode(void);
-void trap_isr_device_not_available(void);
-void trap_isr_double_fault(void);
-void trap_isr_invalid_tss(void);
-void trap_isr_segment_not_present(void);
-void trap_isr_stack_segment_fault(void);
-void trap_isr_general_protection(void);
-void trap_isr_page_fault(void);
-void trap_isr_math_fault(void);
-void trap_isr_alignment_check(void);
-void trap_isr_machine_check(void);
-void trap_isr_simd_fp_exception(void);
-void trap_isr_pic_int7(void);
-void trap_isr_pic_int15(void);
-void trap_isr_xcall(void);
-void trap_isr_thread_schedule(void);
-void trap_isr_cpu_halt(void);
-void trap_isr_lapic_timer(void);
-void trap_isr_lapic_error(void);
-void trap_isr_lapic_spurious(void);
+extern trap_isr_fn_t trap_isr_table[CPU_IDT_SIZE];
 
 /*
  * Array of trap handlers.
- *
- * The additional entry is the default entry used for unhandled traps.
  */
-static struct trap_handler trap_handlers[CPU_IDT_SIZE + 1] __read_mostly;
+static struct trap_handler trap_handlers[CPU_IDT_SIZE] __read_mostly;
+
+/*
+ * Global trap lock.
+ *
+ * This lock is currently only used to serialize concurrent trap handler
+ * updates.
+ *
+ * Interrupts must be disabled when holding this lock.
+ */
+static struct spinlock trap_lock;
+
+static struct trap_handler *
+trap_handler_get(unsigned int vector)
+{
+    assert(vector < ARRAY_SIZE(trap_handlers));
+    return &trap_handlers[vector];
+}
 
 static void __init
 trap_handler_init(struct trap_handler *handler, int flags, trap_handler_fn_t fn)
 {
     handler->flags = flags;
-    handler->fn = fn;
+    atomic_store(&handler->fn, fn, ATOMIC_RELAXED);
 }
 
 static void __init
-trap_install(unsigned int vector, int flags, trap_isr_fn_t isr,
-             trap_handler_fn_t fn)
+trap_install(unsigned int vector, int flags, trap_handler_fn_t fn)
 {
-    assert(vector < CPU_IDT_SIZE);
-
-    trap_handler_init(&trap_handlers[vector], flags, fn);
-    cpu_idt_set_gate(vector, isr);
+    assert(vector < ARRAY_SIZE(trap_handlers));
+    trap_handler_init(trap_handler_get(vector), flags, fn);
 }
 
 static void
@@ -112,7 +107,7 @@ trap_show_thread(void)
     struct thread *thread;
 
     thread = thread_self();
-    printk("trap: interrupted thread: %p (%s)\n", thread, thread->name);
+    printf("trap: interrupted thread: %p (%s)\n", thread, thread->name);
 }
 
 static void
@@ -151,7 +146,7 @@ trap_double_fault(struct trap_frame *frame)
     frame->ss = cpu->tss.ss;
 #endif /* __LP64__ */
 
-    printk("trap: double fault (cpu%u):\n", cpu_id());
+    printf("trap: double fault (cpu%u):\n", cpu_id());
     trap_show_thread();
     trap_frame_show(frame);
     trap_stack_show(frame);
@@ -161,26 +156,32 @@ trap_double_fault(struct trap_frame *frame)
 static void __init
 trap_install_double_fault(void)
 {
+<<<<<<< HEAD
     trap_handler_init(&trap_handlers[TRAP_DF], TRAP_HF_INTR, trap_double_fault);
     cpu_idt_set_double_fault(trap_isr_double_fault);
+=======
+    trap_install(TRAP_DF, TRAP_HF_INTR, trap_double_fault);
+    cpu_idt_set_double_fault(trap_isr_table[TRAP_DF]);
+>>>>>>> sceen/master
 }
 
 static void
 trap_default(struct trap_frame *frame)
 {
     cpu_halt_broadcast();
-    printk("trap: unhandled interrupt or exception (cpu%u):\n", cpu_id());
+    printf("trap: unhandled interrupt or exception (cpu%u):\n", cpu_id());
     trap_show_thread();
     trap_frame_show(frame);
     trap_stack_show(frame);
     cpu_halt();
 }
 
-void __init
+static int __init
 trap_setup(void)
 {
     size_t i;
 
+<<<<<<< HEAD
     for (i = 0; i < CPU_IDT_SIZE; i++) {
         trap_install(i, TRAP_HF_INTR, trap_isr_default, trap_default);
     }
@@ -226,28 +227,83 @@ trap_setup(void)
                  trap_isr_lapic_spurious, lapic_spurious_intr);
 
     trap_handler_init(&trap_handlers[TRAP_DEFAULT], TRAP_HF_INTR, trap_default);
+=======
+    spinlock_init(&trap_lock);
+
+    for (i = 0; i < ARRAY_SIZE(trap_isr_table); i++) {
+        cpu_idt_set_gate(i, trap_isr_table[i]);
+    }
+
+    for (i = 0; i < ARRAY_SIZE(trap_handlers); i++) {
+        trap_install(i, TRAP_HF_INTR, trap_default);
+    }
+
+    /* Architecture defined traps */
+    trap_install(TRAP_DE, 0, trap_default);
+    trap_install(TRAP_DB, 0, trap_default);
+    trap_install(TRAP_NMI, TRAP_HF_INTR, trap_default);
+    trap_install(TRAP_BP, 0, trap_default);
+    trap_install(TRAP_OF, 0, trap_default);
+    trap_install(TRAP_BR, 0, trap_default);
+    trap_install(TRAP_UD, 0, trap_default);
+    trap_install(TRAP_NM, 0, trap_default);
+    trap_install_double_fault();
+    trap_install(TRAP_TS, 0, trap_default);
+    trap_install(TRAP_NP, 0, trap_default);
+    trap_install(TRAP_SS, 0, trap_default);
+    trap_install(TRAP_GP, 0, trap_default);
+    trap_install(TRAP_PF, 0, trap_default);
+    trap_install(TRAP_MF, 0, trap_default);
+    trap_install(TRAP_AC, 0, trap_default);
+    trap_install(TRAP_MC, TRAP_HF_INTR, trap_default);
+    trap_install(TRAP_XM, 0, trap_default);
+
+    /* System defined traps */
+    trap_install(TRAP_XCALL, TRAP_HF_INTR, cpu_xcall_intr);
+    trap_install(TRAP_THREAD_SCHEDULE, TRAP_HF_INTR, cpu_thread_schedule_intr);
+    trap_install(TRAP_CPU_HALT, TRAP_HF_INTR, cpu_halt_intr);
+    trap_install(TRAP_LAPIC_TIMER, TRAP_HF_INTR, lapic_timer_intr);
+    trap_install(TRAP_LAPIC_ERROR, TRAP_HF_INTR, lapic_error_intr);
+    trap_install(TRAP_LAPIC_SPURIOUS, TRAP_HF_INTR, lapic_spurious_intr);
+
+    return 0;
+>>>>>>> sceen/master
 }
+
+INIT_OP_DEFINE(trap_setup);
 
 void
 trap_main(struct trap_frame *frame)
 {
     struct trap_handler *handler;
+    trap_handler_fn_t fn;
 
-    assert(frame->vector < ARRAY_SIZE(trap_handlers));
+    assert(!cpu_intr_enabled());
 
-    handler = &trap_handlers[frame->vector];
+    handler = trap_handler_get(frame->vector);
 
     if (handler->flags & TRAP_HF_INTR) {
         thread_intr_enter();
     }
 
-    handler->fn(frame);
+    fn = atomic_load(&handler->fn, ATOMIC_RELAXED);
+    fn(frame);
 
     if (handler->flags & TRAP_HF_INTR) {
         thread_intr_leave();
     }
 
-    thread_schedule();
+    assert(!cpu_intr_enabled());
+}
+
+void
+trap_register(unsigned int vector, trap_handler_fn_t handler_fn)
+{
+    unsigned long flags;
+
+    spinlock_lock_intr_save(&trap_lock, &flags);
+    trap_install(vector, TRAP_HF_INTR, handler_fn);
+    spinlock_unlock_intr_restore(&trap_lock, flags);
 }
 
 #ifdef __LP64__
@@ -255,7 +311,7 @@ trap_main(struct trap_frame *frame)
 void
 trap_frame_show(struct trap_frame *frame)
 {
-    printk("trap: rax: %016lx rbx: %016lx rcx: %016lx\n"
+    printf("trap: rax: %016lx rbx: %016lx rcx: %016lx\n"
            "trap: rdx: %016lx rbp: %016lx rsi: %016lx\n"
            "trap: rdi: %016lx  r8: %016lx  r9: %016lx\n"
            "trap: r10: %016lx r11: %016lx r12: %016lx\n"
@@ -277,7 +333,7 @@ trap_frame_show(struct trap_frame *frame)
 
     /* XXX Until the page fault handler is written */
     if (frame->vector == 14) {
-        printk("trap: cr2: %016lx\n", (unsigned long)cpu_get_cr2());
+        printf("trap: cr2: %016lx\n", (unsigned long)cpu_get_cr2());
     }
 }
 
@@ -296,7 +352,7 @@ trap_frame_show(struct trap_frame *frame)
         ss = 0;
     }
 
-    printk("trap: eax: %08lx ebx: %08lx ecx: %08lx edx: %08lx\n"
+    printf("trap: eax: %08lx ebx: %08lx ecx: %08lx edx: %08lx\n"
            "trap: ebp: %08lx esi: %08lx edi: %08lx\n"
            "trap: ds: %hu es: %hu fs: %hu gs: %hu\n"
            "trap: vector: %lu error: %08lx\n"
@@ -315,7 +371,7 @@ trap_frame_show(struct trap_frame *frame)
 
     /* XXX Until the page fault handler is written */
     if (frame->vector == 14) {
-        printk("trap: cr2: %08lx\n", (unsigned long)cpu_get_cr2());
+        printf("trap: cr2: %08lx\n", (unsigned long)cpu_get_cr2());
     }
 }
 
@@ -329,4 +385,20 @@ trap_stack_show(struct trap_frame *frame)
 #else /* __LP64__ */
     strace_show(frame->eip, frame->ebp);
 #endif /* __LP64__ */
+}
+
+void *
+trap_get_interrupt_stack(const struct trap_frame *frame)
+{
+    struct trap_cpu_data *cpu_data;
+    struct trap_handler *handler;
+
+    handler = trap_handler_get(frame->vector);
+
+    if ((handler->flags & TRAP_HF_INTR) && !thread_interrupted()) {
+        cpu_data = cpu_local_ptr(trap_cpu_data);
+        return cpu_data->intr_stack + sizeof(cpu_data->intr_stack);
+    } else {
+        return NULL;
+    }
 }

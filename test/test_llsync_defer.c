@@ -29,6 +29,7 @@
  */
 
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <kern/condition.h>
@@ -38,10 +39,9 @@
 #include <kern/macros.h>
 #include <kern/mutex.h>
 #include <kern/panic.h>
-#include <kern/param.h>
-#include <kern/printk.h>
 #include <kern/thread.h>
 #include <kern/work.h>
+#include <machine/page.h>
 #include <test/test.h>
 #include <vm/vm_kmem.h>
 
@@ -87,11 +87,11 @@ test_alloc(void *arg)
             }
         }
 
-        llsync_assign_ptr(test_pdsc, pdsc);
+        llsync_store_ptr(test_pdsc, pdsc);
         condition_signal(&test_condition);
 
         if ((i % TEST_LOOPS_PER_PRINT) == 0) {
-            printk("alloc ");
+            printf("alloc ");
         }
 
         i++;
@@ -130,7 +130,7 @@ test_free(void *arg)
         }
 
         pdsc = test_pdsc;
-        llsync_assign_ptr(test_pdsc, NULL);
+        llsync_store_ptr(test_pdsc, NULL);
 
         if (pdsc != NULL) {
             work_init(&pdsc->work, test_deferred_free);
@@ -140,7 +140,7 @@ test_free(void *arg)
         condition_signal(&test_condition);
 
         if ((i % TEST_LOOPS_PER_PRINT) == 0) {
-            printk("free ");
+            printf("free ");
         }
 
         i++;
@@ -161,19 +161,20 @@ test_read(void *arg)
     for (;;) {
         llsync_read_enter();
 
-        pdsc = llsync_read_ptr(test_pdsc);
+        pdsc = llsync_load_ptr(test_pdsc);
 
         if (pdsc != NULL) {
             s = (const unsigned char *)pdsc->addr;
 
             if (s != NULL) {
-                for (j = 0; j < PAGE_SIZE; j++)
+                for (j = 0; j < PAGE_SIZE; j++) {
                     if (s[j] != TEST_VALIDATION_BYTE) {
                         panic("invalid content");
                     }
+                }
 
                 if ((i % TEST_LOOPS_PER_PRINT) == 0) {
-                    printk("read ");
+                    printf("read ");
                 }
 
                 i++;

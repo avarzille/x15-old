@@ -24,11 +24,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include <kern/cpumap.h>
 #include <kern/error.h>
 #include <kern/list.h>
 #include <kern/thread.h>
+#include <machine/page.h>
 #include <machine/pmap.h>
 #include <test/test.h>
 #include <vm/vm_kmem.h>
@@ -43,9 +45,14 @@ static unsigned char test_pattern = 1;
 static void
 test_write_pages(void)
 {
+    struct vm_map *kernel_map;
+    struct pmap *kernel_pmap;
     struct vm_page *page;
     int error, flags;
     uintptr_t va;
+
+    kernel_map = vm_map_get_kernel_map();
+    kernel_pmap = pmap_get_kernel_pmap();
 
     for (;;) {
         page = vm_page_alloc(0, VM_PAGE_SEL_HIGHMEM, VM_PAGE_KERNEL);
@@ -78,9 +85,14 @@ test_write_pages(void)
 static void
 test_reset_pages(void)
 {
+    struct vm_map *kernel_map;
+    struct pmap *kernel_pmap;
     struct vm_page *page;
     int error, flags;
     uintptr_t va;
+
+    kernel_map = vm_map_get_kernel_map();
+    kernel_pmap = pmap_get_kernel_pmap();
 
     while (!list_empty(&test_pages)) {
         page = list_first_entry(&test_pages, struct vm_page, node);
@@ -115,7 +127,7 @@ test_run(void *arg)
     (void)arg;
 
     for (i = 0; /* no condition */; i++) {
-        printk("test: pass:%u pattern:%hhx\n", i, test_pattern);
+        printf("test: pass:%u pattern:%hhx\n", i, test_pattern);
         test_write_pages();
         test_reset_pages();
         test_pattern++;

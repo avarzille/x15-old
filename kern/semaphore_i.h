@@ -18,7 +18,9 @@
 #ifndef _KERN_SEMAPHORE_I_H
 #define _KERN_SEMAPHORE_I_H
 
-#include <kern/assert.h>
+#include <assert.h>
+#include <stdint.h>
+
 #include <kern/atomic.h>
 
 struct semaphore {
@@ -31,7 +33,7 @@ semaphore_dec(struct semaphore *semaphore)
     unsigned int prev, value;
 
     do {
-        value = semaphore->value;
+        value = atomic_load(&semaphore->value, ATOMIC_RELAXED);
 
         if (value == 0) {
             break;
@@ -54,6 +56,8 @@ semaphore_inc(struct semaphore *semaphore)
 }
 
 void semaphore_wait_slow(struct semaphore *semaphore);
+
+int semaphore_timedwait_slow(struct semaphore *semaphore, uint64_t ticks);
 
 void semaphore_post_slow(struct semaphore *semaphore);
 
