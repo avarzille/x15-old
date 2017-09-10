@@ -131,8 +131,9 @@ vm_object_lookup(struct vm_object *object, uint64_t offset)
 {
     struct vm_page *page;
     int error;
+    llsync_key_t key;
 
-    llsync_read_enter();
+    llsync_read_enter(&object->pages);
 
     do {
         page = rdxtree_lookup(&object->pages, vm_page_btop(offset));
@@ -144,7 +145,7 @@ vm_object_lookup(struct vm_object *object, uint64_t offset)
         error = vm_page_tryref(page);
     } while (error);
 
-    llsync_read_exit();
+    llsync_read_exit(key);
 
     return page;
 }

@@ -153,13 +153,14 @@ test_read(void *arg)
     const struct test_pdsc *pdsc;
     const unsigned char *s;
     unsigned long i, j;
+    llsync_key_t key;
 
     (void)arg;
 
     i = 0;
 
     for (;;) {
-        llsync_read_enter();
+        llsync_read_enter(&test_pdsc);
 
         pdsc = llsync_load_ptr(test_pdsc);
 
@@ -181,7 +182,7 @@ test_read(void *arg)
             }
         }
 
-        llsync_read_exit();
+        llsync_read_exit(key);
     }
 }
 
