@@ -133,7 +133,7 @@ vm_object_lookup(struct vm_object *object, uint64_t offset)
     int error;
     llsync_key_t key;
 
-    llsync_read_enter(&object->pages);
+    key = llsync_read_enter(&object->pages);
 
     do {
         page = rdxtree_lookup(&object->pages, vm_page_btop(offset));

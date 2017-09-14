@@ -134,7 +134,7 @@ llsync_read_enter(const void *ptr)
     return ret;
 }
 
-#define LLSYNC_CPU_MASK   ((1u << (LLSYNC_NODE_SHIFT + 1)) - 1)
+#define LLSYNC_CPU_MASK   ((1u << LLSYNC_NODE_SHIFT) - 1)
 
 void
 llsync_read_exit(llsync_key_t key)

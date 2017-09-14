@@ -160,7 +160,7 @@ test_read(void *arg)
     i = 0;
 
     for (;;) {
-        llsync_read_enter(&test_pdsc);
+        key = llsync_read_enter(&test_pdsc);
 
         pdsc = llsync_load_ptr(test_pdsc);
 
