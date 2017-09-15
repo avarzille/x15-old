@@ -95,7 +95,7 @@ struct rdxtree_node {
         };
 
         /* Deferred destruction when unlinked */
-        struct work work;
+        struct llsync_work work;
     };
 
     unsigned short height;
@@ -189,7 +189,7 @@ rdxtree_node_schedule_destruction(struct rdxtree_node *node)
 {
     assert(node->parent == NULL);
 
-    work_init(&node->work, rdxtree_node_destroy_deferred);
+    llsync_work_init(&node->work, rdxtree_node_destroy_deferred, 0);
 
     /*
      * This assumes that llsync is initialized before scheduling is started

@@ -25,7 +25,16 @@
 #include <stdbool.h>
 
 #include <kern/atomic.h>
+#include <kern/list_types.h>
 #include <kern/work.h>
+
+struct llsync_work {
+    struct work work;
+    struct list node;
+    const void *ptr;
+};
+
+void llsync_work_init(struct llsync_work *wp, work_fn_t fn, const void *ptr);
 
 /*
  * Safely store a pointer.
@@ -62,35 +71,8 @@ llsync_report_context_switch(void)
 
 void llsync_report_periodic_event(void);
 
-void llsync_defer(struct work *work);
+void llsync_defer(struct llsync_work *work);
 
-/*
- * Wait for a quiescent state on a specific predicate.
- */
-void llsync_wait_for(const void *ptr);
-
-/*
- * Wait for every thread to be in a quiescent state.
- */
-void llsync_wait_all(void);
-
-/*
- * The following macro may be called with one argument, in which case
- * it's dispatched as 'llsync_wait_for', or with no arguments, thereby
- * evaluating to 'llsync_wait_all'.
- */
-#define llsync_wait(...)                               \
-MACRO_BEGIN                                            \
-     const void *___p[] = { 0, ##__VA_ARGS__ };        \
-     _Static_assert(ARRAY_SIZE(___p) <= 2,             \
-       "too many arguments in call to 'llsync_wait'"); \
-                                                       \
-     if (ARRAY_SIZE(___p) == 1) {                      \
-         llsync_wait_all();                            \
-     } else {                                          \
-         llsync_wait_for(___p[1]);                     \
-     }                                                 \
-    (void)0;                                           \
-MACRO_END
+void llsync_wait(const void *ptr);
 
 #endif /* _KERN_LLSYNC_H */
