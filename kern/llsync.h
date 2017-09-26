@@ -25,16 +25,7 @@
 #include <stdbool.h>
 
 #include <kern/atomic.h>
-#include <kern/list_types.h>
 #include <kern/work.h>
-
-struct llsync_work {
-    struct work work;
-    struct list node;
-    const void *ptr;
-};
-
-void llsync_work_init(struct llsync_work *wp, work_fn_t fn, const void *ptr);
 
 /*
  * Safely store a pointer.
@@ -71,7 +62,7 @@ llsync_report_context_switch(void)
 
 void llsync_report_periodic_event(void);
 
-void llsync_defer(struct llsync_work *work);
+void llsync_defer(struct work *work, const void *ptr);
 
 void llsync_wait(const void *ptr);
 

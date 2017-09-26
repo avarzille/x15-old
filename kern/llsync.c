@@ -33,17 +33,24 @@ struct llsync_node {
     uint64_t tstamp;
 };
 
+struct llsync_work {
+    struct work *work;
+    const void *ptr;
+};
+
 #define LLSYNC_INVALID_TSTAMP   (~0ull)
 
-/* Number of static nodes in percpu data. */
+/*
+ * Number of static nodes in percpu data.
+ */
 #define LLSYNC_NUM_NODES   8
 
 struct llsync_cpu_data {
     struct llsync_node nodes[LLSYNC_NUM_NODES];
     unsigned long cnt;
-    struct work_queue wc_queue;
-    struct list pred_works;
-    unsigned int nr_pred_works;
+    struct work_queue wqueue;
+    struct llsync_work works[LLSYNC_NUM_NODES * 2];
+    int nr_works;
 };
 
 #define LLSYNC_FULL_BIT   (1ul << (sizeof (long) * 8 - 1))
@@ -51,7 +58,7 @@ struct llsync_cpu_data {
 static struct llsync_cpu_data llsync_cpu_data __percpu;
 
 struct llsync_waiter {
-    struct llsync_work work;
+    struct work work;
     struct spinlock lock;
     struct thread *waiter;
     int done;
@@ -108,14 +115,6 @@ static unsigned long
 llsync_cpu_data_cnt(struct llsync_cpu_data *data)
 {
     return atomic_load(&data->cnt, ATOMIC_RELAXED);
-}
-
-void
-llsync_work_init(struct llsync_work *wp, work_fn_t fn, const void *ptr)
-{
-    work_init(&wp->work, fn);
-    wp->ptr = ptr;
-    list_node_init(&wp->node);
 }
 
 #define LLSYNC_NODE_SHIFT   24
@@ -181,9 +180,8 @@ llsync_setup(void)
             llsync_node_reset(&data->nodes[j]);
         }
 
-        list_init(&data->pred_works);
-        work_queue_init(&data->wc_queue);
-        data->nr_pred_works = 0;
+        work_queue_init(&data->wqueue);
+        data->nr_works = 0;
     }
 
     llsync_is_ready = true;
@@ -204,13 +202,12 @@ llsync_ready(void)
 
 static unsigned long
 llsync_poll_pred(struct llsync_work *wp, uint64_t tstamp,
-                 struct work_queue *wqueue, unsigned int *nump)
+                 struct work_queue *queue, struct llsync_cpu_data *local)
 {
     unsigned long ret, cnt;
+    unsigned int i, j;
     struct llsync_cpu_data *data;
     struct llsync_node *node;
-    unsigned int i, j;
-    bool qstate;
 
     for (i = 0, ret = 0; i < cpu_count(); ++i) {
         data = percpu_ptr(llsync_cpu_data, i);
@@ -218,26 +215,24 @@ llsync_poll_pred(struct llsync_work *wp, uint64_t tstamp,
 
         ret |= cnt;
         if (cnt & LLSYNC_FULL_BIT) {
+            return ret;
+        } else if (cnt == 0) {
             continue;
         }
 
-        for (j = 0, qstate = true; j < LLSYNC_NUM_NODES; ++j) {
+        for (j = 0; j < LLSYNC_NUM_NODES; ++j) {
             node = &data->nodes[j];
 
             if ((node->ptr == wp->ptr || node->ptr == 0) &&
-                (node->tstamp < tstamp)) {
-
-                qstate = false;
-                break;
+                (node->tstamp <= tstamp)) {
+                return ret;
             }
         }
-
-        if (qstate) {
-           list_remove(&wp->node);
-           (*nump)--;
-           work_queue_push(wqueue, &wp->work);
-        }
     }
+
+    work_queue_push(queue, wp->work);
+    local->nr_works--;
+    *wp = local->works[local->nr_works];
 
     return ret;
 }
@@ -262,25 +257,25 @@ void
 llsync_report_periodic_event(void)
 {
     struct llsync_cpu_data *data;
-    unsigned long cnt;
-    struct llsync_work *runp, *tmp;
-    bool empty;
-    uint64_t tstamp;
+    int nrw;
     struct work_queue wq;
+    uint64_t tstamp;
+    bool empty;
+    unsigned long cnt;
 
     data = cpu_local_ptr(llsync_cpu_data);
-    cnt = 0;
-    empty = data->nr_pred_works == 0;
+    empty = data->nr_works == 0;
     tstamp = clock_get_time();
     work_queue_init(&wq);
+    cnt = 0;
 
-    list_for_each_entry_safe(&data->pred_works, runp, tmp, node) {
-        cnt |= llsync_poll_pred(runp, tstamp, &wq, &data->nr_pred_works);
+    for (nrw = data->nr_works - 1; nrw >= 0; --nrw) {
+        cnt |= llsync_poll_pred(&data->works[nrw], tstamp, &wq, data);
     }
 
     if ((!empty && cnt == 0) || (empty && llsync_all_qstate())) {
-        work_queue_concat(&wq, &data->wc_queue);
-        work_queue_init(&data->wc_queue);
+        work_queue_concat(&wq, &data->wqueue);
+        work_queue_init(&data->wqueue);
     }
 
     if (work_queue_nr_works(&wq) > 0) {
@@ -288,10 +283,8 @@ llsync_report_periodic_event(void)
     }
 }
 
-#define LLSYNC_MAX_PRED_WORKS   64
-
 void
-llsync_defer(struct llsync_work *work)
+llsync_defer(struct work *work, const void *ptr)
 {
     unsigned long flags;
     struct llsync_cpu_data *data;
@@ -299,11 +292,16 @@ llsync_defer(struct llsync_work *work)
     thread_preempt_disable_intr_save(&flags);
     data = cpu_local_ptr(llsync_cpu_data);
 
-    if (work->ptr == 0 || (data->nr_pred_works >= LLSYNC_MAX_PRED_WORKS)) {
-        work_queue_push(&data->wc_queue, &work->work);
+    if (ptr == 0 || (data->nr_works == ARRAY_SIZE(data->works))) {
+        /*
+         * Either we have no more room for a predicate-specific callback, or
+         * this is an old-style work, so we push it into the generic queue.
+         */
+        work_queue_push(&data->wqueue, work);
     } else {
-        list_insert_tail(&data->pred_works, &work->node);
-        data->nr_pred_works++;
+        data->works[data->nr_works].work = work;
+        data->works[data->nr_works].ptr = ptr;
+        data->nr_works++;
     }
 
     thread_preempt_enable_intr_restore(flags);
@@ -329,12 +327,12 @@ llsync_wait(const void *ptr)
 {
     struct llsync_waiter w;
 
-    llsync_work_init(&w.work, llsync_signal, ptr);
+    work_init(&w.work, llsync_signal);
     w.waiter = thread_self();
     spinlock_init(&w.lock);
     w.done = 0;
 
-    llsync_defer(&w.work);
+    llsync_defer(&w.work, ptr);
     spinlock_lock(&w.lock);
 
     while (!w.done) {

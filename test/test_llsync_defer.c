@@ -48,7 +48,7 @@
 #define TEST_LOOPS_PER_PRINT 100000
 
 struct test_pdsc {
-    struct llsync_work work;
+    struct work work;
     void *addr;
 };
 
@@ -133,8 +133,8 @@ test_free(void *arg)
         llsync_store_ptr(test_pdsc, NULL);
 
         if (pdsc != NULL) {
-            llsync_work_init(&pdsc->work, test_deferred_free, 0);
-            llsync_defer(&pdsc->work);
+            work_init(&pdsc->work, test_deferred_free);
+            llsync_defer(&pdsc->work, pdsc);
         }
 
         condition_signal(&test_condition);
@@ -160,7 +160,7 @@ test_read(void *arg)
     i = 0;
 
     for (;;) {
-        key = llsync_read_enter(&test_pdsc);
+        key = llsync_read_enter(test_pdsc);
 
         pdsc = llsync_load_ptr(test_pdsc);
 
