@@ -67,8 +67,8 @@ struct llsync_waiter {
 static void
 llsync_node_reset(struct llsync_node *node)
 {
-    node->ptr = (const void *)1;
-    atomic_store_release(&node->tstamp, LLSYNC_INVALID_TSTAMP);
+    atomic_store_release(&node->ptr, (const void *)1);
+    node->tstamp = LLSYNC_INVALID_TSTAMP;
 }
 
 static unsigned long
@@ -261,7 +261,7 @@ llsync_report_periodic_event(void)
     struct work_queue wq;
     uint64_t tstamp;
     bool empty;
-    unsigned long cnt;
+    unsigned long cnt, tmp;
 
     data = cpu_local_ptr(llsync_cpu_data);
     empty = data->nr_works == 0;
@@ -269,8 +269,23 @@ llsync_report_periodic_event(void)
     work_queue_init(&wq);
     cnt = 0;
 
-    for (nrw = data->nr_works - 1; nrw >= 0; --nrw) {
-        cnt |= llsync_poll_pred(&data->works[nrw], tstamp, &wq, data);
+    for (nrw = data->nr_works - 1; nrw >= 0; nrw--) {
+        tmp = llsync_poll_pred(&data->works[nrw], tstamp, &wq, data);
+
+        if (tmp == 0) {
+            /*
+             * Every CPU is in a quiescent state: Flush the work queue.
+             */
+            for (; tmp < (unsigned long)data->nr_works; tmp++) {
+                work_queue_push(&wq, data->works[tmp].work);
+            }
+
+            cnt = 0;
+            data->nr_works = 0;
+            break;
+        }
+
+        cnt |= tmp;
     }
 
     if ((!empty && cnt == 0) || (empty && llsync_all_qstate())) {
@@ -313,12 +328,9 @@ llsync_signal(struct work *work)
     struct llsync_waiter *wp;
 
     wp = structof(work, struct llsync_waiter, work);
+
     spinlock_lock(&wp->lock);
-
-    if (wp->waiter != NULL) {
-        thread_wakeup(wp->waiter);
-    }
-
+    thread_wakeup(wp->waiter);
     spinlock_unlock(&wp->lock);
 }
 
