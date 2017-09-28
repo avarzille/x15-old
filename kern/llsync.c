@@ -122,12 +122,14 @@ llsync_cpu_data_cnt(struct llsync_cpu_data *data)
 llsync_key_t
 llsync_read_enter(const void *ptr)
 {
-    llsync_key_t ret;
+    llsync_key_t ret, i;
     struct llsync_cpu_data *data;
-    unsigned long nv, i;
+    unsigned long nv, flags;
 
+    thread_preempt_disable_intr_save(&flags);
+
+    data = cpu_local_ptr(llsync_cpu_data);
     ret = cpu_id();
-    data = percpu_ptr(llsync_cpu_data, ret);
     nv = llsync_inc_nodes(&data->cnt);
 
     if (!(nv & LLSYNC_FULL_BIT)) {
@@ -135,12 +137,13 @@ llsync_read_enter(const void *ptr)
             if (data->nodes[i].tstamp == LLSYNC_INVALID_TSTAMP) {
                 atomic_store_release(&data->nodes[i].ptr, ptr);
                 data->nodes[i].tstamp = clock_get_time();
-                ret |= (llsync_key_t)((i + 1) << LLSYNC_NODE_SHIFT);
+                ret |= (i + 1) << LLSYNC_NODE_SHIFT;
                 break;
             }
         }
     }
 
+    thread_preempt_enable_intr_restore(flags);
     thread_llsync_read_inc();
     return ret;
 }
