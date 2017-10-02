@@ -615,8 +615,6 @@ thread_runq_schedule(struct thread_runq *runq)
     assert(!cpu_intr_enabled());
     assert(spinlock_locked(&runq->lock));
 
-    llsync_report_context_switch();
-
     thread_clear_flag(prev, THREAD_YIELD);
     thread_runq_put_prev(runq, prev);
 
@@ -2112,8 +2110,6 @@ thread_idle(void *arg)
             goto error_sref;
         }
 
-        llsync_unregister();
-
         for (;;) {
             cpu_intr_disable();
 
@@ -2125,7 +2121,6 @@ thread_idle(void *arg)
             cpu_idle();
         }
 
-        llsync_register();
         sref_register();
 
 error_sref:
@@ -2587,7 +2582,6 @@ thread_run_scheduler(void)
     assert(thread == runq->current);
     assert(thread->preempt == 1);
 
-    llsync_register();
     sref_register();
 
     spinlock_lock(&runq->lock);

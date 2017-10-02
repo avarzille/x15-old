@@ -45,21 +45,6 @@ void llsync_read_exit(llsync_key_t key);
 
 bool llsync_ready(void);
 
-static inline void
-llsync_register(void)
-{
-}
-
-static inline void
-llsync_unregister(void)
-{
-}
-
-static inline void
-llsync_report_context_switch(void)
-{
-}
-
 void llsync_report_periodic_event(void);
 
 void llsync_defer(struct work *work, const void *ptr);
