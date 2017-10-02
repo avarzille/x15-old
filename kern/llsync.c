@@ -17,13 +17,14 @@
  *
  */
 
+#include <assert.h>
 #include <stdint.h>
 #include <kern/clock.h>
-#include <kern/percpu.h>
 #include <kern/list.h>
 #include <kern/llsync.h>
 #include <kern/log.h>
 #include <kern/macros.h>
+#include <kern/percpu.h>
 #include <kern/spinlock.h>
 #include <kern/thread.h>
 #include <machine/cpu.h>
@@ -38,7 +39,7 @@ struct llsync_work {
     const void *ptr;
 };
 
-#define LLSYNC_INVALID_TSTAMP   (~0ull)
+#define LLSYNC_INVALID_TSTAMP   UINT64_MAX
 
 /*
  * Number of static nodes in percpu data.
@@ -117,7 +118,16 @@ llsync_cpu_data_cnt(struct llsync_cpu_data *data)
     return atomic_load(&data->cnt, ATOMIC_RELAXED);
 }
 
-#define LLSYNC_NODE_SHIFT   24
+#define LLSYNC_NODE_SHIFT   16
+
+static_assert(LLSYNC_NODE_SHIFT < (sizeof(llsync_key_t) * 8),
+              "llsync_key_t is too small");
+
+static_assert(LLSYNC_NUM_NODES < (1u << LLSYNC_NODE_SHIFT),
+              "too many static nodes in percpu data");
+
+static_assert(X15_MAX_CPUS < (1u << (32 - LLSYNC_NODE_SHIFT)),
+              "too many cpus to fit in llsync_key_t");
 
 llsync_key_t
 llsync_read_enter(const void *ptr)
